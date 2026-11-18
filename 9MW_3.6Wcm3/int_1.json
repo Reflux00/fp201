@@ -1,0 +1,80 @@
+{
+    "nptu": 201,
+    "legmod": 21,
+    "energy_range": {
+        "r_E_1": 200.0,
+        "r_E_2": 100.0
+    },
+
+    "ipheat": 2,
+    "pwdens": 3.6,
+    "omega_ci": 36.5e6,
+    "kperp": 10,
+
+    "ne": 5.5,
+    "tempe": 4.0,
+    "nspec": 2,
+    "ispec": 1,
+    "azi": [
+        1.0,
+        1.0
+    ],
+    "atm": [
+        2,
+        1
+    ],
+    "aconc": [
+        0.97,
+        0.03
+    ],
+    "tempi": [
+        4.0,
+        4.0
+    ],
+    "out": "ASDEX_NBI_D_H_17245",
+    "plot": true,
+
+    "fnbi": 1,
+    "ficrh": 1,
+
+    "Ns": 1,
+
+    "nbi": {
+        "pwdens": 1.0,
+        "energy_base_keV": 90.0,
+        "energies_keV": null,
+        "use_external_file": false,
+        "source_file": "AUG_17245_NBI.txt",
+        "power_profile_file": "TRANSO_Init_P_NBI_Envelope.txt",
+        "energy_spread_ratio": 0.01,
+        "mu_points": 50,
+
+        "gaussian": {
+            "mu_center": 0.7,
+            "sigma": 0.07
+        }
+    },
+
+    "trapping": {
+        "enabled": 1,
+        "ucr": 0.4,
+        "a": 20.0
+    },
+
+    "plot_settings": {
+        "range_k": 0,
+        "type": 4,
+        "range_mu": 0,
+        "f_max": 1e-1,
+        "f_min": 1e-7,
+        "custom_mu_values": [0.0, 0.2, 0.5, 0.7, 1.0],
+        "duu": 0.1,
+        "xlim_max": 200,
+        "ylim_max": -10
+    },
+
+    "input_mode": {
+        "case_mode": 0,
+        "ipsii": [0.2667]
+    }
+}

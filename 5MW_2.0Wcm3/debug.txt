@@ -1,0 +1,38 @@
+==================== 调试信息汇总 ====================
+
+========== NBI模式 ==========
+[输入] NBI 设置
+  NBI功率密度 pwdens_nbi = 1.0 W/cm^3
+  束能量 energies_keV = [90.0] keV
+[输出]
+---------- 径向位置 psi = 1.0 ----------
+分布能量峰值特征（extract_high_energy_tail_contour）
+  特征能量 char_E = 120.58941032598001 keV
+  特征俯仰角 char_mu = 0.74
+束能量 90.0 keV 附近 tfecmu 最大值
+  max(tfecmu) = 2.449470e-04,  E = 86.4900 keV,  mu = 0.7200
+
+========== ICRH模式 ==========
+[输入] ICRH 设置
+  ICRH输入功率 pwdens = 2 W/cm^3
+  环向捕获 trapping: enabled=1, ucr=0.4, a=20.0
+[输出]
+---------- 径向位置 psi = 1.0 ----------
+分布能量峰值特征（extract_high_energy_tail_contour）
+  特征能量 char_E = 195.3484647544257 keV
+  特征俯仰角 char_mu = 0.15999999999999992
+
+========== 协同加热模式 ==========
+[输入] NBI 设置
+  NBI功率密度 pwdens_nbi = 1.0 W/cm^3
+  束能量 energies_keV = [90.0] keV
+[输入] ICRH 设置
+  ICRH输入功率 pwdens = 2 W/cm^3
+  环向捕获 trapping: enabled=1, ucr=0.4, a=20.0
+[输出]
+---------- 径向位置 psi = 1.0 ----------
+分布能量峰值特征（extract_high_energy_tail_contour）
+  特征能量 char_E = 324.6337231748979 keV
+  特征俯仰角 char_mu = 0.1200000000000001
+束能量 90.0 keV 附近 tfecmu 最大值
+  max(tfecmu) = 8.104950e-05,  E = 86.4900 keV,  mu = 0.2400
