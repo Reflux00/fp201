@@ -1,0 +1,73 @@
+{
+  "probe_dir": "/private/tmp/fp201-nbi-scan-kcelg3yn",
+  "seconds": 4.327278375159949,
+  "nptu": 201,
+  "legmod": 21,
+  "nmu": 101,
+  "emax_keV": 240.00000000000003,
+  "Ti": [
+    4.0,
+    4.0,
+    4.0
+  ],
+  "dqlw": 0.0,
+  "background_source_max": 0.0,
+  "fb1_mxw": 0.179587122125,
+  "operator_coefficient_maxdiff_P1_vs_P10": 0.0,
+  "rows": [
+    {
+      "power_Wcm3": 0.1,
+      "raw_peak": 4.739116403069054e-05,
+      "fnorm": 1.1120667880466344,
+      "normalized_peak": 4.261539373362099e-05,
+      "peak_energy_keV": 87.84599999999999,
+      "peak_mu": 0.7,
+      "f0_boundary": 0.179587122125
+    },
+    {
+      "power_Wcm3": 0.5,
+      "raw_peak": 0.00023695561190276724,
+      "fnorm": 1.5603328276883046,
+      "normalized_peak": 0.00015186222304495537,
+      "peak_energy_keV": 87.84599999999999,
+      "peak_mu": 0.7,
+      "f0_boundary": 0.179587122125
+    },
+    {
+      "power_Wcm3": 1.0,
+      "raw_peak": 0.000473911171742863,
+      "fnorm": 2.1206653772403445,
+      "normalized_peak": 0.00022347286697327567,
+      "peak_energy_keV": 87.84599999999999,
+      "peak_mu": 0.7,
+      "f0_boundary": 0.179587122125
+    },
+    {
+      "power_Wcm3": 2.0,
+      "raw_peak": 0.0009478222914230546,
+      "fnorm": 3.2413304763446167,
+      "normalized_peak": 0.000292417665628453,
+      "peak_energy_keV": 87.84599999999999,
+      "peak_mu": 0.7,
+      "f0_boundary": 0.179587122125
+    },
+    {
+      "power_Wcm3": 5.0,
+      "raw_peak": 0.00236955565046363,
+      "fnorm": 6.603325773657628,
+      "normalized_peak": 0.000358842760706491,
+      "peak_energy_keV": 87.84599999999999,
+      "peak_mu": 0.7,
+      "f0_boundary": 0.179587122125
+    },
+    {
+      "power_Wcm3": 10.0,
+      "raw_peak": 0.0047391112488645885,
+      "fnorm": 12.206651269177966,
+      "normalized_peak": 0.00038824007865539154,
+      "peak_energy_keV": 87.84599999999999,
+      "peak_mu": 0.7,
+      "f0_boundary": 0.179587122125
+    }
+  ]
+}
