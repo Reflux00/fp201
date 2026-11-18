@@ -1,0 +1,38 @@
+[
+  {
+    "L": 21,
+    "max_coefficient_error": 1.2909255279261456e-06,
+    "worst_order": 21,
+    "actual_at_order": -0.06046297780271199,
+    "reference_at_order": -0.06046168687718406,
+    "source_reconstruction_min": -0.08609465768027358,
+    "reference_projection_reconstruction_min": -0.08609238841444322
+  },
+  {
+    "L": 41,
+    "max_coefficient_error": 0.00016897379827242917,
+    "worst_order": 41,
+    "actual_at_order": -0.0005712656114351817,
+    "reference_at_order": -0.0007402394097076109,
+    "source_reconstruction_min": -0.0003245805231270882,
+    "reference_projection_reconstruction_min": -0.00017169921829044004
+  },
+  {
+    "L": 61,
+    "max_coefficient_error": 0.0018955476975905964,
+    "worst_order": 61,
+    "actual_at_order": 0.0018947865383408965,
+    "reference_at_order": -7.611592496998545e-07,
+    "source_reconstruction_min": -0.0010695443331380458,
+    "reference_projection_reconstruction_min": -1.9847895547699475e-07
+  },
+  {
+    "L": 81,
+    "max_coefficient_error": 0.050002356667126,
+    "worst_order": 81,
+    "actual_at_order": -0.05000235693926143,
+    "reference_at_order": -2.7213543441276674e-10,
+    "source_reconstruction_min": -0.058869595734891256,
+    "reference_projection_reconstruction_min": -2.3751516839329102e-11
+  }
+]

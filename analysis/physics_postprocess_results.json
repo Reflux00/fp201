@@ -1,0 +1,26 @@
+{
+  "radial_postprocessing": {
+    "selected_species": "second ion (3 percent concentration)",
+    "selected_ion_density_m3": 1.65e+18,
+    "electron_density_used_m3": 5.5e+19,
+    "density_factor_error": 33.33333333333333,
+    "sample_energy_keV": 3.5999999999999996,
+    "first_call_value": 4.017011771617501e+18,
+    "second_call_value": 6455130365407783.0,
+    "second_over_first": 0.0016069483318463223,
+    "energy_zero_value": 9.87729171688416e+18,
+    "correct_dndE_dmu_at_zero": 0.0
+  },
+  "zero_icrh_input": {
+    "input_Wcm3": 0.0,
+    "power_after_initialization": 1.0,
+    "harmonic_power_profile": [
+      [
+        1.0
+      ],
+      [
+        1.0
+      ]
+    ]
+  }
+}

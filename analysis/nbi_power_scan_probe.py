@@ -105,7 +105,7 @@ def run_scan(config_path, output_dir=None):
             rows = []
             for power in [.1, .5, 1., 2., 5., 10.]:
                 rhs = b0 + power * (b1 - b0)
-                raw = solve_banded((ssp.iwd, ssp.iwd), A, rhs)
+                raw = ssp.solve_density_constrained(A, rhs).copy()
                 coefficients = raw.reshape(ssp.nptu, 2 * ssp.nfvrb)[:, 0::2]
                 raw_f = coefficients @ ssp.plgcmu
                 raw_peak = float(np.max(raw_f[energy_mask, :]))
@@ -123,6 +123,9 @@ def run_scan(config_path, output_dir=None):
                     "peak_energy_keV": float(actual_energy),
                     "peak_mu": float(ssp.xmu[i_mu]),
                     "f0_boundary": float(raw[0]),
+                    "nonnegative_isotropic_component": bool(np.min(coefficients[:, 0]) >= -1e-12),
+                    "model_failure": (None if np.min(coefficients[:, 0]) >= -1e-12 else
+                                      "The fixed-density Maxwellian replacement model has no nonnegative steady state"),
                 })
                 np.savez_compressed(
                     probe_dir / f"P-{power}.npz", raw=raw, raw_distribution=raw_f,

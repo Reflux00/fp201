@@ -1,0 +1,55 @@
+{
+  "source_scaling": [
+    {
+      "ne_1e19_m3": 2.75,
+      "beam_keV": 90,
+      "declared_power_Wcm3": 1.0,
+      "anuref_per_s": 252.67950157973962,
+      "zemxw_Wcm3": 4.338009263506017,
+      "particle_moment": 0.0009876543209876546,
+      "power_Wcm3": 0.09641466588656757
+    },
+    {
+      "ne_1e19_m3": 5.5,
+      "beam_keV": 90,
+      "declared_power_Wcm3": 1.0,
+      "anuref_per_s": 495.75173805855843,
+      "zemxw_Wcm3": 17.02216142308294,
+      "particle_moment": 0.0009876543209876546,
+      "power_Wcm3": 0.37832699438436446
+    },
+    {
+      "ne_1e19_m3": 11,
+      "beam_keV": 90,
+      "declared_power_Wcm3": 1.0,
+      "anuref_per_s": 972.2889459152751,
+      "zemxw_Wcm3": 66.76914316856727,
+      "particle_moment": 0.0009876543209876546,
+      "power_Wcm3": 1.4839813008898344
+    },
+    {
+      "ne_1e19_m3": 5.5,
+      "beam_keV": 45,
+      "declared_power_Wcm3": 0.9999999999999999,
+      "anuref_per_s": 495.75173805855843,
+      "zemxw_Wcm3": 17.02216142308294,
+      "particle_moment": 0.0039506172839506165,
+      "power_Wcm3": 0.7567674698448826
+    }
+  ],
+  "collision_function": {
+    "max_absolute_error": 1.388584803252435e-07,
+    "max_relative_error": 1.7079435868259746e-06
+  },
+  "equal_temperature_maxwell_flux_max": 3.469446951953614e-18,
+  "unequal_temperature": {
+    "local_Te_keV": 2.0,
+    "ctx_tempe_keV": 4.0,
+    "electron_collision_coefficient_stale": 228.2400692473224,
+    "maxwell_collision_power_Wcm3": -0.4124037385888105,
+    "background_source_power_Wcm3": 0.4124037385887481,
+    "sum_Wcm3": -6.23945339839338e-14,
+    "electron_collision_coefficient_local": 218.63280414640155,
+    "relative_coefficient_error": 0.04394246846181238
+  }
+}

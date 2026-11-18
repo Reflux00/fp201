@@ -1,0 +1,656 @@
+{
+  "solver_sha256": "061ff74b674b24a868bfdee4ef96b5dbcb21e515c87fdb67817ec6c684136a24",
+  "configuration": {
+    "nptu": 301,
+    "legmod": 61,
+    "energy_range": {
+      "r_E_1": 200.0,
+      "r_E_2": 135.0
+    },
+    "ipheat": 2,
+    "pwdens": 0.2,
+    "rf_power_mode": "absorbed",
+    "omega_ci": 36500000.0,
+    "frequency_convention": "rf_hz",
+    "kperp": 10,
+    "ne": 5.5,
+    "tempe": 4.0,
+    "nspec": 2,
+    "ispec": 1,
+    "azi": [
+      1.0,
+      1.0
+    ],
+    "atm": [
+      2,
+      1
+    ],
+    "aconc": [
+      0.97,
+      0.03
+    ],
+    "tempi": [
+      4.0,
+      4.0
+    ],
+    "out": "ASDEX_NBI_D_H_17245",
+    "plot": true,
+    "fnbi": 1,
+    "ficrh": 1,
+    "Ns": 1,
+    "nbi": {
+      "pwdens": 1.0,
+      "energy_base_keV": 90.0,
+      "energies_keV": null,
+      "use_external_file": false,
+      "source_file": "AUG_17245_NBI.txt",
+      "power_profile_file": "TRANSO_Init_P_NBI_Envelope.txt",
+      "energy_spread_ratio": 0.01,
+      "mu_points": 50,
+      "gaussian": {
+        "mu_center": 0.7,
+        "sigma": 0.07
+      }
+    },
+    "trapping": {
+      "enabled": 1,
+      "model": "symmetric",
+      "ucr": 0.4,
+      "a": 20.0
+    },
+    "plot_settings": {
+      "range_k": 0,
+      "type": 4,
+      "range_mu": 0,
+      "f_max": 0.1,
+      "f_min": 1e-07,
+      "custom_mu_values": [
+        0.0,
+        0.2,
+        0.5,
+        0.7,
+        1.0
+      ],
+      "duu": 0.1,
+      "xlim_max": 200,
+      "ylim_max": -10
+    },
+    "input_mode": {
+      "case_mode": 0,
+      "ipsii": [
+        0.2667
+      ]
+    }
+  },
+  "unit_tests_passed": 47,
+  "full_cli_output": "FPQL_Results_physics_repaired",
+  "modes": [
+    {
+      "mode": "1_NBI_only",
+      "fnorm": 1.0000000000000004,
+      "density_residual": 4.440892098500626e-16,
+      "particle_balance_residual": 1.7870203408841813e-16,
+      "bulk_power_residual": 2.9976021664879227e-14,
+      "nbi_injected_power": 1.0000000000000002,
+      "nbi_sink_power": 0.06666666666666668,
+      "rf_absorbed_power": 0.0,
+      "matrix_relative_residual": 7.034113289896843e-16,
+      "mean_energy_keV": 11.551234558539914,
+      "mean_parallel_velocity_ms": 151743.2902474923,
+      "thermal_parallel_temperature_keV": 8.585262876630562,
+      "distribution_checks_passed": true,
+      "min_F_dense_mu": 1.419746705279068e-56,
+      "upper_energy_max_F": 7.374418763482863e-53,
+      "tail_energy_keV": 125.80915892720049,
+      "tail_mu": 0.74
+    },
+    {
+      "mode": "2_ICRH_only",
+      "fnorm": 0.9999999999999999,
+      "density_residual": 1.1102230246251565e-16,
+      "particle_balance_residual": 7.076558194787826e-15,
+      "bulk_power_residual": 4.338196468722799e-14,
+      "nbi_injected_power": 0.0,
+      "nbi_sink_power": 0.0,
+      "rf_absorbed_power": 0.1999999999925833,
+      "matrix_relative_residual": 1.268509582191013e-15,
+      "mean_energy_keV": 6.365176320488138,
+      "mean_parallel_velocity_ms": 0.0,
+      "thermal_parallel_temperature_keV": 4.137355554238667,
+      "distribution_checks_passed": true,
+      "min_F_dense_mu": -1.6501515651001688e-12,
+      "upper_energy_max_F": 7.138038636381935e-10,
+      "tail_energy_keV": 152.68782105396505,
+      "tail_mu": 0.40000000000000013
+    },
+    {
+      "mode": "3_Synergy",
+      "fnorm": 1.0000000000000002,
+      "density_residual": 2.220446049250313e-16,
+      "particle_balance_residual": 6.247048241170624e-15,
+      "bulk_power_residual": 1.163513729807164e-13,
+      "nbi_injected_power": 1.0000000000000002,
+      "nbi_sink_power": 0.06666666666666668,
+      "rf_absorbed_power": 0.19999999999999993,
+      "matrix_relative_residual": 1.6268284490592e-15,
+      "mean_energy_keV": 13.266202926514797,
+      "mean_parallel_velocity_ms": 166905.240544219,
+      "thermal_parallel_temperature_keV": 9.133547486279213,
+      "distribution_checks_passed": true,
+      "min_F_dense_mu": -1.3720590229058778e-11,
+      "upper_energy_max_F": 2.908800860005149e-09,
+      "tail_energy_keV": 324.9493417724057,
+      "tail_mu": 0.40000000000000013
+    }
+  ],
+  "nbi_grid": [
+    {
+      "label": "nbi-n101",
+      "nptu": 101,
+      "legmod": 5,
+      "configuration": {
+        "nptu": 101,
+        "legmod": 5,
+        "energy_range": {
+          "r_E_1": 200.0,
+          "r_E_2": 135.0
+        },
+        "ipheat": 2,
+        "pwdens": 0.2,
+        "rf_power_mode": "absorbed",
+        "omega_ci": 36500000.0,
+        "frequency_convention": "rf_hz",
+        "kperp": 10,
+        "ne": 5.5,
+        "tempe": 4.0,
+        "nspec": 2,
+        "ispec": 1,
+        "azi": [
+          1.0,
+          1.0
+        ],
+        "atm": [
+          2,
+          1
+        ],
+        "aconc": [
+          0.97,
+          0.03
+        ],
+        "tempi": [
+          4.0,
+          4.0
+        ],
+        "out": "ASDEX_NBI_D_H_17245",
+        "plot": true,
+        "fnbi": 1,
+        "ficrh": 0,
+        "Ns": 1,
+        "nbi": {
+          "pwdens": 1.0,
+          "energy_base_keV": 90.0,
+          "energies_keV": null,
+          "use_external_file": false,
+          "source_file": "AUG_17245_NBI.txt",
+          "power_profile_file": "TRANSO_Init_P_NBI_Envelope.txt",
+          "energy_spread_ratio": 0.1,
+          "mu_points": 50,
+          "gaussian": {
+            "mu_center": 0.7,
+            "sigma": 0.07
+          }
+        },
+        "trapping": {
+          "enabled": 1,
+          "model": "symmetric",
+          "ucr": 0.4,
+          "a": 20.0
+        },
+        "plot_settings": {
+          "range_k": 0,
+          "type": 4,
+          "range_mu": 0,
+          "f_max": 0.1,
+          "f_min": 1e-07,
+          "custom_mu_values": [
+            0.0,
+            0.2,
+            0.5,
+            0.7,
+            1.0
+          ],
+          "duu": 0.1,
+          "xlim_max": 200,
+          "ylim_max": -10
+        },
+        "input_mode": {
+          "case_mode": 0,
+          "ipsii": [
+            0.2667
+          ]
+        }
+      },
+      "emax_keV": 540.0,
+      "du": 0.1161895003862225,
+      "NBI_input_Wcm3": 1.0,
+      "ICRH_input_Wcm3": 0.0,
+      "hrate_Wcm3": 0.0,
+      "fnorm": 0.9999999999999999,
+      "zemxw": 16.949974699962514,
+      "nbi_source_power_raw_Wcm3": 0.9333333333333331,
+      "nbi_particle_source_raw": 0.0026220950314777007,
+      "original_origin_row_residual_4pi": 5.062816373806373e-16,
+      "nbi_injected_power_Wcm3": 0.9999999999999998,
+      "nbi_sink_power_Wcm3": 0.06666666666666668,
+      "nbi_net_particle_source": -8.673617379884035e-19,
+      "density_residual": 1.1102230246251565e-16,
+      "power_relative_residual": 0.0,
+      "matrix_relative_residual": 2.1977464358600415e-16,
+      "bulk_power_residual_Wcm3": 6.772360450213455e-15,
+      "collisional_power_Wcm3": -0.9333333333333265,
+      "min_distribution": -0.00018599253398438536,
+      "minimum_energy_keV": 86.4,
+      "minimum_mu": 1.0,
+      "negative_grid_count": 1818,
+      "raw_f0_at_first_nodes": [
+        0.15786384158534283,
+        0.15575528673842182,
+        0.14958859355629484,
+        0.13984961010664015,
+        0.12727354259731835
+      ],
+      "raw_f0_at_u1": 0.0584994569201129,
+      "normalized_f0_at_u1": 0.0584994569201129,
+      "htemp_keV": 7.726552219212356,
+      "htpar_keV": 9.102862784134235,
+      "htperp_keV": 7.038396936751416,
+      "last_energy_f_max": 3.6830672450100897e-41,
+      "last_energy_above_1e7": 0,
+      "tail_threshold": 1e-07,
+      "char_mu": 0.74,
+      "char_E_keV": 135.7889919947711,
+      "seconds": 0.053556958213448524
+    },
+    {
+      "label": "nbi-n201",
+      "nptu": 201,
+      "legmod": 5,
+      "configuration": {
+        "nptu": 201,
+        "legmod": 5,
+        "energy_range": {
+          "r_E_1": 200.0,
+          "r_E_2": 135.0
+        },
+        "ipheat": 2,
+        "pwdens": 0.2,
+        "rf_power_mode": "absorbed",
+        "omega_ci": 36500000.0,
+        "frequency_convention": "rf_hz",
+        "kperp": 10,
+        "ne": 5.5,
+        "tempe": 4.0,
+        "nspec": 2,
+        "ispec": 1,
+        "azi": [
+          1.0,
+          1.0
+        ],
+        "atm": [
+          2,
+          1
+        ],
+        "aconc": [
+          0.97,
+          0.03
+        ],
+        "tempi": [
+          4.0,
+          4.0
+        ],
+        "out": "ASDEX_NBI_D_H_17245",
+        "plot": true,
+        "fnbi": 1,
+        "ficrh": 0,
+        "Ns": 1,
+        "nbi": {
+          "pwdens": 1.0,
+          "energy_base_keV": 90.0,
+          "energies_keV": null,
+          "use_external_file": false,
+          "source_file": "AUG_17245_NBI.txt",
+          "power_profile_file": "TRANSO_Init_P_NBI_Envelope.txt",
+          "energy_spread_ratio": 0.1,
+          "mu_points": 50,
+          "gaussian": {
+            "mu_center": 0.7,
+            "sigma": 0.07
+          }
+        },
+        "trapping": {
+          "enabled": 1,
+          "model": "symmetric",
+          "ucr": 0.4,
+          "a": 20.0
+        },
+        "plot_settings": {
+          "range_k": 0,
+          "type": 4,
+          "range_mu": 0,
+          "f_max": 0.1,
+          "f_min": 1e-07,
+          "custom_mu_values": [
+            0.0,
+            0.2,
+            0.5,
+            0.7,
+            1.0
+          ],
+          "duu": 0.1,
+          "xlim_max": 200,
+          "ylim_max": -10
+        },
+        "input_mode": {
+          "case_mode": 0,
+          "ipsii": [
+            0.2667
+          ]
+        }
+      },
+      "emax_keV": 540.0,
+      "du": 0.05809475019311125,
+      "NBI_input_Wcm3": 1.0,
+      "ICRH_input_Wcm3": 0.0,
+      "hrate_Wcm3": 0.0,
+      "fnorm": 1.0000000000000002,
+      "zemxw": 16.949974699962514,
+      "nbi_source_power_raw_Wcm3": 0.9333333333333336,
+      "nbi_particle_source_raw": 0.002622095031477701,
+      "original_origin_row_residual_4pi": 2.160967725782395e-15,
+      "nbi_injected_power_Wcm3": 1.0000000000000002,
+      "nbi_sink_power_Wcm3": 0.06666666666666665,
+      "nbi_net_particle_source": 4.336808689942018e-19,
+      "density_residual": 2.220446049250313e-16,
+      "power_relative_residual": 0.0,
+      "matrix_relative_residual": 3.5163327348771357e-16,
+      "bulk_power_residual_Wcm3": 2.886579864025407e-14,
+      "collisional_power_Wcm3": -0.9333333333333045,
+      "min_distribution": -0.0001870158346879301,
+      "minimum_energy_keV": 88.5735,
+      "minimum_mu": 1.0,
+      "negative_grid_count": 2669,
+      "raw_f0_at_first_nodes": [
+        0.15786660540017822,
+        0.15733622675630007,
+        0.15575512152460544,
+        0.15315524205627884,
+        0.149588330514708
+      ],
+      "raw_f0_at_u1": 0.05835027529234521,
+      "normalized_f0_at_u1": 0.05835027529234521,
+      "htemp_keV": 7.726552214727396,
+      "htpar_keV": 9.102862779648813,
+      "htperp_keV": 7.038396932266687,
+      "last_energy_f_max": 8.02987428011553e-52,
+      "last_energy_above_1e7": 0,
+      "tail_threshold": 1e-07,
+      "char_mu": 0.74,
+      "char_E_keV": 135.55216077746368,
+      "seconds": 0.08558129100129008
+    },
+    {
+      "label": "nbi-n401",
+      "nptu": 401,
+      "legmod": 5,
+      "configuration": {
+        "nptu": 401,
+        "legmod": 5,
+        "energy_range": {
+          "r_E_1": 200.0,
+          "r_E_2": 135.0
+        },
+        "ipheat": 2,
+        "pwdens": 0.2,
+        "rf_power_mode": "absorbed",
+        "omega_ci": 36500000.0,
+        "frequency_convention": "rf_hz",
+        "kperp": 10,
+        "ne": 5.5,
+        "tempe": 4.0,
+        "nspec": 2,
+        "ispec": 1,
+        "azi": [
+          1.0,
+          1.0
+        ],
+        "atm": [
+          2,
+          1
+        ],
+        "aconc": [
+          0.97,
+          0.03
+        ],
+        "tempi": [
+          4.0,
+          4.0
+        ],
+        "out": "ASDEX_NBI_D_H_17245",
+        "plot": true,
+        "fnbi": 1,
+        "ficrh": 0,
+        "Ns": 1,
+        "nbi": {
+          "pwdens": 1.0,
+          "energy_base_keV": 90.0,
+          "energies_keV": null,
+          "use_external_file": false,
+          "source_file": "AUG_17245_NBI.txt",
+          "power_profile_file": "TRANSO_Init_P_NBI_Envelope.txt",
+          "energy_spread_ratio": 0.1,
+          "mu_points": 50,
+          "gaussian": {
+            "mu_center": 0.7,
+            "sigma": 0.07
+          }
+        },
+        "trapping": {
+          "enabled": 1,
+          "model": "symmetric",
+          "ucr": 0.4,
+          "a": 20.0
+        },
+        "plot_settings": {
+          "range_k": 0,
+          "type": 4,
+          "range_mu": 0,
+          "f_max": 0.1,
+          "f_min": 1e-07,
+          "custom_mu_values": [
+            0.0,
+            0.2,
+            0.5,
+            0.7,
+            1.0
+          ],
+          "duu": 0.1,
+          "xlim_max": 200,
+          "ylim_max": -10
+        },
+        "input_mode": {
+          "case_mode": 0,
+          "ipsii": [
+            0.2667
+          ]
+        }
+      },
+      "emax_keV": 540.0,
+      "du": 0.029047375096555625,
+      "NBI_input_Wcm3": 1.0,
+      "ICRH_input_Wcm3": 0.0,
+      "hrate_Wcm3": 0.0,
+      "fnorm": 0.9999999999999999,
+      "zemxw": 16.949974699962514,
+      "nbi_source_power_raw_Wcm3": 0.9333333333333332,
+      "nbi_particle_source_raw": 0.002622095031477701,
+      "original_origin_row_residual_4pi": -1.814971269986556e-15,
+      "nbi_injected_power_Wcm3": 0.9999999999999999,
+      "nbi_sink_power_Wcm3": 0.06666666666666665,
+      "nbi_net_particle_source": 4.336808689942018e-19,
+      "density_residual": 1.1102230246251565e-16,
+      "power_relative_residual": 0.0,
+      "matrix_relative_residual": 1.0548984766912516e-15,
+      "bulk_power_residual_Wcm3": 6.772360450213455e-15,
+      "collisional_power_Wcm3": -0.9333333333333266,
+      "min_distribution": -0.00018779634331788882,
+      "minimum_energy_keV": 87.48337499999998,
+      "minimum_mu": 1.0,
+      "negative_grid_count": 5332,
+      "raw_f0_at_first_nodes": [
+        0.15786680649697687,
+        0.15773400175225635,
+        0.15733621579285467,
+        0.15667547133347495,
+        0.15575509930138923
+      ],
+      "raw_f0_at_u1": 0.05832879572634252,
+      "normalized_f0_at_u1": 0.05832879572634252,
+      "htemp_keV": 7.726552214650526,
+      "htpar_keV": 9.10286277957178,
+      "htperp_keV": 7.038396932189899,
+      "last_energy_f_max": 8.180314654563246e-52,
+      "last_energy_above_1e7": 0,
+      "tail_threshold": 1e-07,
+      "char_mu": 0.74,
+      "char_E_keV": 135.46985059691767,
+      "seconds": 0.15205345815047622
+    },
+    {
+      "label": "nbi-n801",
+      "nptu": 801,
+      "legmod": 5,
+      "configuration": {
+        "nptu": 801,
+        "legmod": 5,
+        "energy_range": {
+          "r_E_1": 200.0,
+          "r_E_2": 135.0
+        },
+        "ipheat": 2,
+        "pwdens": 0.2,
+        "rf_power_mode": "absorbed",
+        "omega_ci": 36500000.0,
+        "frequency_convention": "rf_hz",
+        "kperp": 10,
+        "ne": 5.5,
+        "tempe": 4.0,
+        "nspec": 2,
+        "ispec": 1,
+        "azi": [
+          1.0,
+          1.0
+        ],
+        "atm": [
+          2,
+          1
+        ],
+        "aconc": [
+          0.97,
+          0.03
+        ],
+        "tempi": [
+          4.0,
+          4.0
+        ],
+        "out": "ASDEX_NBI_D_H_17245",
+        "plot": true,
+        "fnbi": 1,
+        "ficrh": 0,
+        "Ns": 1,
+        "nbi": {
+          "pwdens": 1.0,
+          "energy_base_keV": 90.0,
+          "energies_keV": null,
+          "use_external_file": false,
+          "source_file": "AUG_17245_NBI.txt",
+          "power_profile_file": "TRANSO_Init_P_NBI_Envelope.txt",
+          "energy_spread_ratio": 0.1,
+          "mu_points": 50,
+          "gaussian": {
+            "mu_center": 0.7,
+            "sigma": 0.07
+          }
+        },
+        "trapping": {
+          "enabled": 1,
+          "model": "symmetric",
+          "ucr": 0.4,
+          "a": 20.0
+        },
+        "plot_settings": {
+          "range_k": 0,
+          "type": 4,
+          "range_mu": 0,
+          "f_max": 0.1,
+          "f_min": 1e-07,
+          "custom_mu_values": [
+            0.0,
+            0.2,
+            0.5,
+            0.7,
+            1.0
+          ],
+          "duu": 0.1,
+          "xlim_max": 200,
+          "ylim_max": -10
+        },
+        "input_mode": {
+          "case_mode": 0,
+          "ipsii": [
+            0.2667
+          ]
+        }
+      },
+      "emax_keV": 540.0,
+      "du": 0.014523687548277812,
+      "NBI_input_Wcm3": 1.0,
+      "ICRH_input_Wcm3": 0.0,
+      "hrate_Wcm3": 0.0,
+      "fnorm": 0.9999999999999999,
+      "zemxw": 16.949974699962514,
+      "nbi_source_power_raw_Wcm3": 0.9333333333333336,
+      "nbi_particle_source_raw": 0.002622095031477701,
+      "original_origin_row_residual_4pi": -1.0382722941465397e-14,
+      "nbi_injected_power_Wcm3": 1.0000000000000002,
+      "nbi_sink_power_Wcm3": 0.06666666666666665,
+      "nbi_net_particle_source": 4.336808689942018e-19,
+      "density_residual": 1.1102230246251565e-16,
+      "power_relative_residual": 0.0,
+      "matrix_relative_residual": 1.7581639821418238e-15,
+      "bulk_power_residual_Wcm3": -1.2156942119645464e-13,
+      "collisional_power_Wcm3": -0.9333333333334553,
+      "min_distribution": -0.00018779625691016236,
+      "minimum_energy_keV": 87.48337499999998,
+      "minimum_mu": 1.0,
+      "negative_grid_count": 10652,
+      "raw_f0_at_first_nodes": [
+        0.15786681957741291,
+        0.15783360512722514,
+        0.15773400106581476,
+        0.1575681342173964,
+        0.1573362143081033
+      ],
+      "raw_f0_at_u1": 0.05831833169844195,
+      "normalized_f0_at_u1": 0.05831833169844195,
+      "htemp_keV": 7.726552214644504,
+      "htpar_keV": 9.102862779565623,
+      "htperp_keV": 7.038396932183944,
+      "last_energy_f_max": 8.181301232994684e-52,
+      "last_energy_above_1e7": 0,
+      "tail_threshold": 1e-07,
+      "char_mu": 0.74,
+      "char_E_keV": 135.43248345068187,
+      "seconds": 0.2856037088204175
+    }
+  ]
+}

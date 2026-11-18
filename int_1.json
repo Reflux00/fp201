@@ -1,14 +1,16 @@
 {
-    "nptu": 201,
-    "legmod": 21,
+    "nptu": 301,
+    "legmod": 61,
     "energy_range": {
         "r_E_1": 200.0,
-        "r_E_2": 60.0
+        "r_E_2": 135.0
     },
 
     "ipheat": 2,
     "pwdens": 0.2,
+    "rf_power_mode": "absorbed",
     "omega_ci": 36.5e6,
+    "frequency_convention": "rf_hz",
     "kperp": 10,
 
     "ne": 5.5,
@@ -57,6 +59,7 @@
 
     "trapping": {
         "enabled": 1,
+        "model": "symmetric",
         "ucr": 0.4,
         "a": 20.0
     },

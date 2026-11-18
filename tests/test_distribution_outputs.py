@@ -7,11 +7,13 @@ import unittest
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.integrate import simpson
 
 from solver_loader import load_solver
 
 
 FP = load_solver()["FP"]
+plot_radial_distribution_with_contours = load_solver()["plot_radial_distribution_with_contours"]
 
 
 class DistributionOutputTests(unittest.TestCase):
@@ -58,7 +60,7 @@ class DistributionOutputTests(unittest.TestCase):
         fp = self.fp
         fp.nptu, fp.nfvrb, fp.legmod = 3, 2, 1
         fp.du = 0.5
-        fp.fb = np.tile([1.0, 2.0, 0.25, 0.5], fp.nptu)
+        fp.fb = np.tile([1.0, 0.0, 0.25, 0.0], fp.nptu)
         original_solution = fp.fb.copy()
         fp.tbfu = np.zeros((3, 2))
         fp.tbdfu = np.zeros((3, 2))
@@ -66,7 +68,7 @@ class DistributionOutputTests(unittest.TestCase):
             fp.disfun(1)
         self.assertAlmostEqual(fp.fnorm, 4 * np.pi / 3)
         np.testing.assert_array_equal(fp.raw_tbfu, np.tile([1.0, 0.25], (3, 1)))
-        np.testing.assert_array_equal(fp.raw_tbdfu, np.tile([2.0, 0.5], (3, 1)))
+        np.testing.assert_array_equal(fp.raw_tbdfu, np.zeros((3, 2)))
         np.testing.assert_allclose(fp.tbfu * fp.fnorm, fp.raw_tbfu)
         np.testing.assert_allclose(fp.tbdfu * fp.fnorm, fp.raw_tbdfu)
         np.testing.assert_array_equal(fp.fb, original_solution)
@@ -120,6 +122,110 @@ class DistributionOutputTests(unittest.TestCase):
         self.assertIn("触及边界的 mu = [0.0]", debug)
         self.assertIn("负值网格点数 = 1", debug)
         self.assertIn("fnorm = 2.000000000000e+00", debug)
+
+    def radial_fixture(self, radial_points=1):
+        fp = self.fp
+        fp.nptu, fp.nmu, fp.nrdpsi = 4001, 5, radial_points
+        fp.ispres, fp.nspele, fp.ipheat = 1, 3, 2
+        fp.r_E_1 = fp.r_E_2 = 20.0
+        fp.ztempi = np.full((3, radial_points), 4.0)
+        fp.zdeni = np.tile([[5.335], [0.165], [5.5]], (1, radial_points))
+        fp.redpsi = np.linspace(0.1, 1, radial_points)
+        fp.xmu = np.linspace(-1, 1, fp.nmu)
+        fp.mu_min, fp.mu_max = -1.0, 1.0
+        fp.nbi_energies_keV = [30.0]
+        velocity = np.linspace(0, np.sqrt(20), fp.nptu)
+        maxwellian = np.exp(-velocity**2) / np.pi**1.5
+        fp.f_v_mu_psi = np.broadcast_to(
+            maxwellian[:, None, None], (fp.nptu, fp.nmu, radial_points)
+        ).copy()
+        return fp
+
+    def test_energy_spectrum_uses_selected_species_and_phase_space_jacobian(self):
+        fp = self.radial_fixture()
+        with contextlib.redirect_stdout(io.StringIO()):
+            spectrum, energy = fp.integrate_over_radius()
+        # Exact isotropic Maxwell energy density per unit mu, with Ti=4 keV.
+        ni = 0.165e19
+        expected = ni * np.sqrt(energy) * np.exp(-energy / 4) / (np.sqrt(np.pi) * 4**1.5)
+        np.testing.assert_allclose(spectrum[:, 2], expected, rtol=3e-5, atol=1.0)
+        np.testing.assert_array_equal(spectrum[0], 0)
+        density = simpson(simpson(spectrum, x=fp.xmu, axis=1), x=energy)
+        self.assertAlmostEqual(density / ni, 1.0, delta=4e-5)
+        header = (self.output / "12_energy_spectrum.txt").read_text().splitlines()[:3]
+        self.assertIn("Energy_keV", header[0])
+        self.assertIn("m^-3 keV^-1", header[0])
+        self.assertIn("single radial point", header[1])
+
+    def test_repeated_energy_mapping_preserves_the_original_velocity_distribution(self):
+        fp = self.radial_fixture(radial_points=2)
+        fp.ztempi[fp.ispres] = [2.0, 4.0]
+        original = fp.f_v_mu_psi.copy()
+        with contextlib.redirect_stdout(io.StringIO()):
+            first, first_energy = fp.integrate_over_radius()
+            second, second_energy = fp.integrate_over_radius()
+        np.testing.assert_array_equal(first, second)
+        np.testing.assert_array_equal(first_energy, second_energy)
+        np.testing.assert_array_equal(fp.f_v_mu_psi, original)
+        self.assertEqual(fp.radial_weight_model, "cylindrical approximation: dV proportional to r dr")
+        self.assertTrue(np.all(fp.energy_spectrum_mu_psi[first_energy > 40, :, 0] == 0))
+
+    def test_explicit_radial_volume_derivative_weights(self):
+        fp = self.radial_fixture(radial_points=3)
+        fp.redpsi = np.array([0.1, 0.3, 1.0])
+        fp.zdeni[fp.ispres] = [1, 2, 4]
+        with contextlib.redirect_stdout(io.StringIO()):
+            spectrum, energy = fp.integrate_over_radius(dvolume_dpsi=[2, 3, 4])
+        # Piecewise-linear integration gives weighted density 8.5/2.95 * 1e19.
+        density = simpson(simpson(spectrum, x=fp.xmu, axis=1), x=energy)
+        self.assertAlmostEqual(density / ((8.5 / 2.95) * 1e19), 1, delta=4e-5)
+        self.assertEqual(fp.radial_weight_model, "explicit dV/dpsi weights")
+        with self.assertRaisesRegex(ValueError, "weights"):
+            fp.integrate_over_radius(dvolume_dpsi=[2, -1, 4])
+
+    def test_radial_plot_highlights_beam_without_rescaling_data(self):
+        fp = self.radial_fixture()
+        original = fp.f_v_mu_psi.copy()
+        with contextlib.redirect_stdout(io.StringIO()):
+            fig, _ = plot_radial_distribution_with_contours(
+                fp, show_nbi_contour=False, show_nbi_marker=False,
+                show_icrh_contour=False, show_icrh_marker=False, highlight_nbi_peak=True,
+            )
+        self.addCleanup(plt.close, fig)
+        np.testing.assert_array_equal(fp.nbi_f_processed, fp.radial_energy_spectrum)
+        np.testing.assert_array_equal(fp.f_v_mu_psi, original)
+        self.assertIn('keV', fig.axes[-1].get_ylabel())
+        self.assertTrue((self.output / "NBI_Integrated_2D_Heatmap.png").is_file())
+
+    def test_legacy_all_modes_plot_does_not_relabel_one_distribution(self):
+        with self.assertRaisesRegex(NotImplementedError, 'run_selected_modes'):
+            load_solver()['plot_all_modes'](self.fp, str(self.output))
+
+    def test_outdis_uses_all_ions_and_the_actual_electron_index(self):
+        for nspele in (2, 4):
+            with self.subTest(nspele=nspele):
+                fp = self.distribution_fixture()
+                fp.nspele = nspele
+                fp.ctx.tempi = [1.0] * nspele
+                for name in ("hrate", "htperp", "htpar", "htemp", "ttailx", "ttailz", "ttblkx", "ttblkz"):
+                    setattr(fp, name, 1.0)
+                for name in ("thrate", "thtprp", "thtpar", "thttot", "tavgtx", "tavgtz", "tavbkx", "tavbkz"):
+                    setattr(fp, name, np.zeros((1, 1)))
+                fp.ipsplf = np.zeros((1, 2), dtype=int)
+                fp.psinxt, fp.dpsxnt = 0.0, 0.1
+                fp.zdotn = fp.pwsrce = fp.pwnbi = fp.pwnbi_l = fp.zbalpw = 0.0
+                fp.emax, fp.joutql = 10.0, 0
+                fp.pwcoll = np.array([0.0, -10.0])
+                fp.pwexch = np.array([np.zeros(nspele), np.arange(1, nspele + 1)])
+                case_path = self.output / f"case-{nspele}.txt"
+                fp.output_paths['case'] = str(case_path)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    fp.outdis(1)
+                columns = np.loadtxt(case_path)
+                self.assertEqual(columns[1], sum(range(1, nspele)))
+                self.assertEqual(columns[2], nspele)
+                log = (self.output / 'read.txt').read_text()
+                self.assertIn('二阶矩等效温度', log)
 
 
 if __name__ == "__main__":

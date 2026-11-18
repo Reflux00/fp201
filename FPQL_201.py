@@ -13,9 +13,10 @@ from scipy import special, linalg
 from scipy import interpolate
 from scipy.ndimage import gaussian_filter1d
 from scipy.special import erf
-from scipy.integrate import simpson
+from scipy.integrate import simpson, trapezoid
 from scipy.special import legendre
 from scipy.linalg import solve_banded
+from scipy.optimize import brentq
 
 import math
 import time
@@ -129,8 +130,14 @@ class FP:
 
         # 环向捕获效应
         self.enable_trapping = False    # 1：开启 0：关闭
+        self.trapping_model = "symmetric"  # 经验共振可达权重；directional 仅用于历史对照
         self.trapping_ucr = 0.4         # 捕获效应 Sigmoid 权重的临界俯仰角 uc
         self.trapping_a = 20.0          # 捕获效应 Sigmoid 权重的陡度参数 a
+        self.trapping_model = 'symmetric'
+        self.frequency_convention = 'rf_hz'
+        self.rf_power_mode = 'absorbed'
+        self.power_tolerance = 1e-7
+        self.plot_enabled = True
 
         # 网格设置
         self.r_E_1 = 100.0 # 基频加热模式的速度范围系数，乘以温度就是能量范围
@@ -180,6 +187,7 @@ class FP:
         self.ipheat = ipheat
         self.kperp = kperp
         self.omega_ci = omega_ci
+        self.frequency_convention = "rf_hz"
         self.power = power
         self.ispec = ispec
         
@@ -378,8 +386,8 @@ class FP:
         # append_to_file(self.output_paths["read"], f"iex_sumnph = {self.iex_sumnph}\n")
 
         append_to_file(self.output_paths["case"],
-            f"{' '*2}variables=r(ra),少子-背景离子_碰撞转移功率(MW/m^3),少子-电子_碰撞转移功率(MW/m^3),"
-            f"平均能量(keV),平均能量⊥(keV),平均能量∥(keV),高能尾温度⊥(keV)\n"
+            f"{' '*2}variables=r(ra),向所有离子碰撞转移功率(MW/m^3),向电子碰撞转移功率(MW/m^3),"
+            f"二阶矩温度(keV),二阶矩温度⊥(keV),二阶矩温度∥(keV),高能尾温度⊥(keV)\n"
         )
 
         # append_to_file(self.output_paths["case"],
@@ -504,8 +512,9 @@ class FP:
                     #输出等离子体参数和碰撞系数
                     self.outpsi(ipsi)
 
-                    # Construct stiffness matrix
-                    self.matrix()
+                    # Enforce density and the requested RF power in the solve,
+                    # without rescaling the physical source afterwards.
+                    self.solve_stationary(ipsi)
 
                     # # 输出带状矩阵文件
                     # with open('11_A.txt', 'w') as f:
@@ -578,49 +587,7 @@ class FP:
                     # except Exception as e:
                     #     print(f"保存矩阵时出错: {e}")
                     
-                    append_to_file(self.output_paths["read"], f"开始迭代求解\n")
-                    for itry in range(1, self.itrmax + 1):
-                        # Boundary conditions
-
-                        self.boundv(itry)
-                        
-                        self.fb = solve_banded((self.iwd, self.iwd), aa, self.fb)    #求解矩阵
-                        # 检查解的合理性
-                        if np.any(np.isnan(self.fb)) or np.any(np.isinf(self.fb)):
-                            print(f"警告: 第{itry}次迭代解无效")
-                            break
-
-                        # 直接检查 Ax=b；保持带状存储，避免构造完整矩阵。
-                        residual = -self.fb_store.copy()
-                        for offset in range(-self.iwd, self.iwd + 1):
-                            col_start = max(0, -offset)
-                            col_stop = min(self.nfdim, self.nfdim - offset)
-                            residual[col_start + offset:col_stop + offset] += (
-                                aa[self.iwd + offset, col_start:col_stop]
-                                * self.fb[col_start:col_stop]
-                            )
-                        self.matrix_relative_residual = float(
-                            np.linalg.norm(residual, ord=np.inf)
-                            / max(np.linalg.norm(self.fb_store, ord=np.inf), np.finfo(float).tiny)
-                        )
-                        append_to_file(
-                            self.output_paths["read"],
-                            f"线性方程相对残差 ||Ax-b||∞/||b||∞ = {self.matrix_relative_residual:.6e}\n"
-                        )
-
-                        # # Solve for coefficients
-                        # self.fb = linalg.lu_solve((lu, piv), self.fb)
-                        
-                        # Reconstruct distribution function
-                        self.disfun(ipsi)
-                        
-                        # Check parameters and convergence
-                        self.dfparm(ipsi, itry)
-                        
-                        if self.iok != 0: break
-                        
-                        if itry == self.itrmax:
-                            print(f"警告: F(0)的迭代在点{ipsi}处不收敛")
+                    self.dfparm(ipsi, self.power_iterations)
                     
                     self.outdis(ipsi)
                     self.write_debug_info(ipsi)   # 写入调试信息文件 debug.txt
@@ -632,10 +599,10 @@ class FP:
                     else:
                         plot_range = 'full'
 
-                    if self.redpsi[ipsi-1] in ipsii:
+                    if self.redpsi[ipsi-1] in self.ipsii:
 
                         filename = os.path.join(self.current_out_dir, f'case0_Fi_{self.redpsi[ipsi-1]}.txt')
-                        Es = self.tbu**2 * ctx.tempi[self.ispres]
+                        Es = self.tbkev.copy()
                         col_indices = self.xmu
                         print(f"写入维度: nptu={self.nptu}, nmu={self.nmu}")
 
@@ -660,8 +627,21 @@ class FP:
                             mu=self.xmu,
                             fnorm=self.fnorm,
                             matrix_relative_residual=self.matrix_relative_residual,
+                            density_residual=self.density_residual,
+                            particle_balance_residual=self.particle_balance_residual,
+                            bulk_power_residual=self.bulk_power_residual,
+                            nbi_injected_power=self.nbi_injected_power,
+                            nbi_sink_power=self.nbi_sink_power,
+                            rf_absorbed_power=self.hrate,
+                            distribution_checks_passed=self.distribution_checks_passed,
+                            mean_energy_keV=self.mean_energy_keV,
+                            mean_parallel_velocity_ms=self.mean_parallel_velocity_ms,
+                            thermal_parallel_temperature_keV=self.thermal_parallel_temperature_keV,
                         )
                         print(f"✅ 分布函数已保存: {filename}")
+
+                        if not self.plot_enabled:
+                            continue
 
                         idx_pos = np.argmin(np.abs(self.xmu - 0.8))
                         idx_neg = np.argmin(np.abs(self.xmu + 0.8))
@@ -770,10 +750,10 @@ class FP:
         self.nspele = self.ctx.nspec + 1
         self.nmu = 101
         self.nibj = 101
-        self.kamax = 6
+        self.kamax = 6  # 仅用于旧版多项式矩诊断；实际 RF 核不截断。
         
         append_to_file(self.output_paths["read"], f"俯仰角空间点数 nmu = {self.nmu}\n")
-        append_to_file(self.output_paths["read"], f"贝塞尔函数阶数 kamax = {self.kamax}\n")
+        append_to_file(self.output_paths["read"], "RF 扩散使用完整 Bessel 核；旧版多项式矩仅供诊断\n")
         append_to_file(self.output_paths["read"], f"电子是第nspele = {self.nspele} 个粒子\n")
 
 
@@ -872,10 +852,8 @@ class FP:
         #一致性测试
         self.ibreak =0
 
-        if self.icrh_enabled == 1:
-            if self.power <= 0  :
-                self.power = 1
-                print("功率输入为负值，已设置为默认值 1 MW")
+        if not np.isfinite(self.power) or self.power < 0:
+            raise ValueError("ICRH 功率必须是有限非负值；0 表示不加热")
 
         #输出控制
         if self.joutql <= 2 and self.nptu >50 :
@@ -925,6 +903,28 @@ class FP:
         # 输入参数导入部分
         if self.nrdpsi > 1:
             # 输入径向位置、温度、密度、功率数据
+            profiles = {}
+            for name in ('P', 'N0', 'N1', 'Ne', 'T0', 'T1', 'Te'):
+                values = np.asarray(self.arrays[name], dtype=float)
+                if values.shape != (self.nrdpsi,) or not np.isfinite(values).all():
+                    raise ValueError(f"径向剖面 {name} 必须与径向网格等长且全部有限")
+                profiles[name] = values
+            radii = np.asarray(self.positions, dtype=float)
+            if (radii.shape != (self.nrdpsi,) or not np.isfinite(radii).all()
+                    or np.any(np.diff(radii) <= 0) or np.any(radii < 0) or np.any(radii > 1)):
+                raise ValueError("径向剖面位置必须是 [0,1] 内严格递增的 rho")
+            if np.any(profiles['P'] < 0):
+                raise ValueError("径向 RF 功率剖面不能为负")
+            if any(np.any(profiles[name] <= 0) for name in ('T0', 'T1', 'Te', 'Ne')):
+                raise ValueError("径向温度和电子密度必须为正")
+            if any(np.any(profiles[name] < 0) for name in ('N0', 'N1')):
+                raise ValueError("径向离子密度不能为负")
+            if np.any(profiles[f'N{self.ispec}'] <= 0):
+                raise ValueError("被求解离子的径向密度必须为正")
+            charge_density = self.ctx.azi[0] * profiles['N0'] + self.ctx.azi[1] * profiles['N1']
+            if not np.allclose(charge_density, profiles['Ne'], rtol=1e-6, atol=0):
+                raise ValueError("径向密度剖面必须满足准中性 Σ Zi*ni = ne")
+            self.arrays = profiles
             for isp in range(self.ctx.nspec):
                 self.pwredf[isp,:] = np.array(self.arrays['P'], dtype=np.float64)
                 self.pwredh[isp,:] = np.array(self.arrays['P'], dtype=np.float64)
@@ -1081,14 +1081,19 @@ class FP:
         
         # ================= 导入全径向 NBI 功率沉积剖面 =================
         if self.nbi_enabled and self.nbi_power_file is not None and os.path.exists(self.nbi_power_file):
-            try:
-                # 读取文件：第一列 rho，第二列 Power(W/cm3)
-                power_data = np.loadtxt(self.nbi_power_file, skiprows=1)
-                self.nbi_power_profile = power_data[:, 1] # 提取功率列
-                print(f"✅ 成功从 {self.nbi_power_file} 加载全径向 NBI 功率剖面，共 {len(self.nbi_power_profile)} 个点")
-            except Exception as e:
-                print(f"⚠️ 读取 NBI 功率剖面 {self.nbi_power_file} 失败: {e}，将使用常数 pwdens_nbi")
-                self.nbi_power_profile = None
+            # Both files must use the same radial coordinate as redpsi. Row
+            # numbers are not magnetic-surface coordinates.
+            power_data = np.loadtxt(self.nbi_power_file, skiprows=1, ndmin=2)
+            if (power_data.shape[1] < 2 or not np.all(np.isfinite(power_data[:, :2]))
+                    or np.any(power_data[:, 1] < 0)
+                    or np.any((power_data[:, 0] < 0) | (power_data[:, 0] > 1))
+                    or np.any(np.diff(power_data[:, 0]) <= 0)):
+                raise ValueError("NBI power profile requires increasing rho in [0,1] and nonnegative finite powers")
+            coordinates = power_data[:, 0]
+            if np.any(self.redpsi < coordinates[0]) or np.any(self.redpsi > coordinates[-1]):
+                raise ValueError("NBI power profile must cover every requested radial coordinate")
+            self.nbi_power_profile = np.interp(self.redpsi, coordinates, power_data[:, 1])
+            print(f"✅ NBI 功率剖面已按径向坐标插值到 {len(self.nbi_power_profile)} 个求解磁面")
         elif self.nbi_enabled:
             print(f"⚠️ 未指定 NBI 功率剖面文件或文件不存在，将使用常数 pwdens_nbi={self.pwdens_nbi}")
             self.nbi_power_profile = None
@@ -1123,20 +1128,30 @@ class FP:
                                     rho_file = None 
                                     break
                 
-                raw_data = np.loadtxt(self.nbi_file, skiprows=1)
+                raw_data = np.loadtxt(self.nbi_file, skiprows=1, ndmin=2)
                 print(f"[步骤1] 原始数据读取完成，形状: {raw_data.shape}")
                 
                 # -----------------------------------------------------------
                 # 2. 提取并验证 Mu 坐标
                 # -----------------------------------------------------------
+                if raw_data.shape[0] < 2 or raw_data.shape[1] < 2 or not np.isfinite(raw_data).all():
+                    raise ValueError("NBI angular source requires finite mu rows and at least one rho column")
                 mu_data = raw_data[:, 0]
                 S_data = raw_data[:, 1:] 
+                if (np.any(np.diff(mu_data) <= 0) or np.any(np.abs(mu_data) > 1)
+                        or np.any(S_data < 0)):
+                    raise ValueError("NBI mu must increase within [-1,1] and source values must be nonnegative")
                 
                 if rho_file is None or len(rho_file) != S_data.shape[1]:
-                    print("  [警告] 未识别到表头径向坐标，假设径向列均匀分布。")
-                    rho_file = np.linspace(0, 1.0, S_data.shape[1])
-                else:
-                    rho_file = np.array(rho_file)
+                    raise ValueError("NBI header must name every radial column: Mu rho_0.0 rho_0.5 ...")
+                rho_file = np.asarray(rho_file, dtype=float)
+                if (not np.isfinite(rho_file).all() or np.any(np.diff(rho_file) <= 0)
+                        or np.any((rho_file < 0) | (rho_file > 1))):
+                    raise ValueError("NBI radial coordinates must increase within normalized minor radius rho in [0,1]")
+                rho_fp = np.asarray(self.redpsi, dtype=float)
+                if (rho_fp.shape != (self.nrdpsi,) or not np.isfinite(rho_fp).all()
+                        or np.any(rho_fp < rho_file[0]) or np.any(rho_fp > rho_file[-1])):
+                    raise ValueError("NBI angular source must cover every requested rho; extrapolation is not supported")
                     
                 print(f"[步骤2] 坐标提取完成:")
                 print(f"  Mu 范围: [{mu_data.min():.2f}, {mu_data.max():.2f}], 点数: {len(mu_data)}")
@@ -1157,21 +1172,13 @@ class FP:
                 # 3. 径向插值对齐
                 # -----------------------------------------------------------
                 actual_nrdpsi = S_data.shape[1]
-                if actual_nrdpsi != self.nrdpsi or not np.allclose(rho_file, np.linspace(0, 1.0, self.nrdpsi)):
-                    from scipy.interpolate import interp1d
-                    
-                    if hasattr(self, 'redpsi') and len(self.redpsi) == self.nrdpsi and np.max(self.redpsi) > 0:
-                        rho_fp = self.redpsi / np.max(self.redpsi) 
-                    else:
-                        rho_fp = np.linspace(0, 1.0, self.nrdpsi)
-                        
+                if actual_nrdpsi != self.nrdpsi or not np.allclose(rho_file, rho_fp):
                     print(f"[步骤3] 开始径向插值: 文件({actual_nrdpsi}点) -> FP代码({self.nrdpsi}点)")
                     print(f"  目标 Rho 范围: [{rho_fp.min():.2f}, {rho_fp.max():.2f}]")
                     
                     S_data_aligned = np.zeros((len(mu_data), self.nrdpsi))
                     for i_mu in range(len(mu_data)):
-                        f_interp = interp1d(rho_file, S_data[i_mu, :], kind='linear', fill_value=0.0, bounds_error=False)
-                        S_data_aligned[i_mu, :] = f_interp(rho_fp)
+                        S_data_aligned[i_mu, :] = np.interp(rho_fp, rho_file, S_data[i_mu, :])
                     S_data = S_data_aligned
                     print(f"  径向插值完成，新形状: {S_data.shape}")
                 else:
@@ -1238,6 +1245,10 @@ class FP:
                     print(f"  光束 {k}: E={E_nbi_keV[k]:.1f} keV, 功率占比={power_fractions[k]*100:.1f}%")
 
                 self.nbi_in = np.zeros((self.ctx.nspec, self.Ns, self.nmu, self.nrdpsi))
+                # Preserve the original angular knots for exact integration
+                # of the piecewise-linear source, independently of plot nmu.
+                self.nbi_native_mu = mu_data.copy()
+                self.nbi_native_profiles = power_fractions[:, None, None] * S_data[None, :, :]
                 for isp in range(self.ctx.nspec):
                     for k in range(self.Ns):
                         for ipsi in range(self.nrdpsi):
@@ -1248,13 +1259,8 @@ class FP:
                 print("【NBI 诊断】数据导入流程成功结束！")
                 print("="*60 + "\n")
                 
-            except Exception as e:
-                import traceback
-                print("\n" + "#"*60)
-                print(f"❌【NBI 诊断】导入 NBI 数据失败: {e}")
-                traceback.print_exc() 
-                print("#"*60 + "\n")
-                self._generate_test_gaussian_nbi()
+            except (OSError, ValueError) as error:
+                raise ValueError(f"无法读取外部 NBI 源 {self.nbi_file}: {error}") from error
                 
         else:
             if self.nbi_enabled and self.nbi_file is None:
@@ -1755,6 +1761,7 @@ class FP:
         tempe = self.ztempi[self.nspele-1, ipsi]
         self.ctx.dens = dens
         self.ctx.tempi[self.nspele-1] = tempe
+        self.ctx.tempe = tempe
         
         # 设置浓度
         for isp in range(self.ctx.nspec):
@@ -1829,7 +1836,7 @@ class FP:
             self.vthisp[isp] = self.vth[self.ispres] / self.vth[isp]
         
         # 初始化碰撞算子
-        self.zemxw = 1.609E-3 * dens * self.ctx.aconc[self.ispres] * \
+        self.zemxw = 1.602176634E-3 * dens * self.ctx.aconc[self.ispres] * \
                     self.ctx.tempi[self.ispres] * self.anuref
         
         # 计算福克-普朗克算子和源项
@@ -1850,11 +1857,22 @@ class FP:
             self.nbi_enabled = sa
             self.tab_source[ip] = self.psourc
         
-        # 计算功率交换
-        k = -2
-        self.zdotn = 4.0 * np.pi * self.zemxw * self.qlmomu(self.tab_source, self.du, self.nptu, k)
-        k = 0
-        self.pwsrce = 4.0 * np.pi * self.zemxw * self.qlmomu(self.tab_source, self.du, self.nptu, k)
+        # Use the same source samples as the weak-form RHS. zdotn is the
+        # dimensionless particle-rate moment; pwsrce is an energy rate.
+        particle_source = 0.0
+        energy_source = 0.0
+        nbi_enabled = self.nbi_enabled
+        self.nbi_enabled = 0
+        for element in range(self.nfelem):
+            for point, weight in zip(self.zgaus, self.wgaus):
+                u = self.tbu[element] + self.du * point
+                self.fokker(u)
+                self.source(u)
+                particle_source += self.du * weight * self.psourc
+                energy_source += self.du * weight * u**2 * self.psourc
+        self.nbi_enabled = nbi_enabled
+        self.zdotn = 4 * np.pi * particle_source
+        self.pwsrce = 4 * np.pi * self.zemxw * energy_source
         
         # 计算能量交换
         for isp in range(self.nspele):
@@ -1867,58 +1885,40 @@ class FP:
         isp = -1
         self.pwcoll[0] = self.zemxw * self.exchcl(isp)
         
-        # NBI参数计算
+        # sig[k,n] has units W cm^-3 keV^-1. Its zeroth coefficient is
+        # P_k/E_k; higher coefficients preserve the supplied angular shape.
         self.pwnbi = 0.0
         self.pwnbi_l = 0.0
         if self.nbi_enabled:
-            # 计算NBI源项
-            self.S_nbi_ku = np.zeros((self.Ns, self.nmu))
-            for k in range(self.Ns):
-                # 使用局部温度归一化速度
-                self.v_nbi_k[k] = np.sqrt(self.nbi_energies_keV[k] / self.ctx.tempi[self.ispres])
-                # 计算实际能量
-                self.E_nbi_k[k] = self.v_nbi_k[k]**2 * self.ctx.tempi[self.ispres]
-                for u in range(self.nmu):
-                    self.S_nbi_ku[k,u] = self.nbi_in[self.ispres, k, u, ipsi]
-            
-            # 计算sig
+            if not np.isfinite(self.pwdens_nbi) or self.pwdens_nbi < 0:
+                raise ValueError("NBI power density must be finite and nonnegative")
+            energies = np.asarray(self.nbi_energies_keV, dtype=float)
+            if energies.shape != (self.Ns,) or np.any(~np.isfinite(energies)) or np.any(energies <= 0):
+                raise ValueError("Each NBI beam requires one positive finite energy in keV")
+            self.E_nbi_k = energies.copy()
+            self.v_nbi_k = np.sqrt(energies / self.ctx.tempi[self.ispres])
+            self.S_nbi_ku = self.nbi_in[self.ispres, :, :, ipsi].copy()
+            if self.nbi_file is not None:
+                self.S_nbi_native = self.nbi_native_profiles[:, :, ipsi]
+            if np.any(~np.isfinite(self.S_nbi_ku)) or np.any(self.S_nbi_ku < 0):
+                raise ValueError("NBI angular power profiles must be finite and nonnegative")
             self.sig_nbi()
-
-            # 计算NBI功率
-            
-            for k in range(self.Ns):
-                self.pwnbi += self.E_nbi_k[k] * self.sig[k, 0]
-                self.pwnbi_l -= 1.5 * self.sig[k, 0] * self.ctx.tempi[self.ispres]
-
-            append_to_file(self.output_paths["read"], f"整理前pwnbi = {self.pwnbi}\n")
-            append_to_file(self.output_paths["read"], f"整理前pwnbi_l = {self.pwnbi_l}\n")
-            
-            # 重新整理计算NBI功率
-            norm_coeff = self.pwdens_nbi / self.pwnbi
-            self.sig = self.sig * norm_coeff
+            relative_power = self.sig[:, 0].sum()
+            if self.pwdens_nbi > 0 and relative_power <= 0:
+                raise ValueError("Positive NBI power requires a nonzero angular source profile")
+            if relative_power > 0:
+                self.sig *= self.pwdens_nbi / (relative_power * energies[:, None])
+            else:
+                self.sig.fill(0.0)
             self.dnbi = 1.0
-
-            self.pwnbi = 0.0
-            self.pwnbi_l = 0.0
-            for k in range(self.Ns):
-                self.pwnbi += self.E_nbi_k[k] * self.sig[k, 0]
-                self.pwnbi_l -= 1.5 * self.sig[k, 0] * self.ctx.tempi[self.ispres]
-
-            # append_to_file(self.output_paths["read"], f"整理后pwnbi = {self.pwnbi}\n")
-            # append_to_file(self.output_paths["read"], f"整理后pwnbi_l = {self.pwnbi_l}\n")
-
-            # 这里只检验代数缩放；真正进入方程的源能量矩在 matrix 中独立积分。
-            expected_power = self.pwdens_nbi
-            actual_power = self.pwnbi
-            energy_error = abs(actual_power - expected_power) / expected_power
-
-            append_to_file(self.output_paths["read"], f"功率吸收输入pwdens_nbi = {self.pwdens_nbi}\n")
-            append_to_file(self.output_paths["read"], f"束系数标定功率pwnbi = {self.pwnbi}\n")
-            append_to_file(self.output_paths["read"], f"输入功率代数缩放相对误差 = {energy_error:.2e}\n")
-
-            if energy_error > 1e-6:
-                append_to_file(self.output_paths["read"], f"警告：NBI输入功率缩放不一致，误差: {energy_error:.2e}\n")
-                print(f"警告：NBI输入功率缩放不一致，误差: {energy_error:.2e}")
+            self.pwnbi = float(np.dot(energies, self.sig[:, 0]))
+        self._prepare_nbi_source()
+        append_to_file(
+            self.output_paths["read"],
+            f"NBI 物理输入功率 = {self.pwnbi:.12e} W/cm³\n"
+            f"NBI 注入粒子率 = {self.nbi_particle_injection_rate:.12e} cm^-3 s^-1\n"
+            f"NBI Maxwell 热粒子汇功率 = {-self.nbi_sink_power:.12e} W/cm³\n"
+        )
             
             # # 计算物理注入速率
             # E_beam_J = self.nbi_energies_keV[0] * 1.602E-16
@@ -2135,9 +2135,16 @@ class FP:
         # xiperp = np.sqrt(self.qnfsq) * self.ipheat * self.vth[self.ispres] / self.ctx.vlight
 
 
-        # self.kperp = 10 
-        # self.omega_ci = 33.8e6
-        xiperp = self.kperp * self.vth[self.ispres] / self.omega_ci / (2 * np.pi) * 1e-2
+        # Bessel 参数使用离子回旋角频率；vth 为 cm/s，kperp 为 m^-1。
+        if self.frequency_convention == "rf_hz":
+            cyclotron_angular_frequency = 2 * np.pi * self.omega_ci / self.ipheat
+        elif self.frequency_convention == "cyclotron_hz":
+            cyclotron_angular_frequency = 2 * np.pi * self.omega_ci
+        elif self.frequency_convention == "cyclotron_rad_s":
+            cyclotron_angular_frequency = self.omega_ci
+        else:
+            raise ValueError(f"Unknown frequency_convention: {self.frequency_convention}")
+        xiperp = self.kperp * self.vth[self.ispres] * 1e-2 / cyclotron_angular_frequency
         
         self.xiperp = xiperp
         # self.xiperp = 73.7
@@ -2148,24 +2155,18 @@ class FP:
         print(f"垂直参数 omega_ci = {self.omega_ci}")
         print(f"垂直参数 xi = {self.xiperp}")
         
-        if self.ipheat == 1:
-            ksup = int(np.floor((xiumax - 0.516) / 0.465) + 2)
-        else:
-            ksup = int(np.floor((xiumax - 0.965) / 0.530) + 2)
-
-        print(f"垂直参数 ksup = {ksup}")
-        
-
-        if ksup < 0:
-                ksup = 0
-
-        if self.legmod > 0 and ksup > self.legmod:
-            print(f"{' '*5}警告: Dql的勒让德展开可能不收敛，在点{self.redpsi[ipsi]:8.3f}处")
-            print(f"{' '*5}收敛的建议值是勒让德阶数 = {self.legmod:3d}")
-            ksup = self.legmod
-        self.ksup = min(ksup, self.kamax)
-        # self.ksup = ksup
-        append_to_file(self.output_paths["read"], f"ksup = {self.ksup}\n")
+        # 直接积分完整非负 Bessel 平方核，不再截断为 kamax 项。
+        self.ksup = 0
+        self.coelgd_with_weight_optimized(
+            enable_weight=self.enable_trapping, uc=self.trapping_ucr, a=self.trapping_a,
+            max_bessel_argument=abs(xiumax),
+        )
+        append_to_file(self.output_paths["read"],
+                       f"QL kernel: full Bessel square; angular Gauss points = {len(self.ql_mu)}\n")
+        if not self.icrh_enabled or self.pwdens == 0.0:
+            self.dqlw = 0.0
+            self.tbdqlk.fill(0.0)
+            return
         
 
         # 初始化扩散系数
@@ -2173,35 +2174,12 @@ class FP:
             zdqlw = self.pwdens / self.zemxw
             self.dqlw = 1.0
 
-            # 贝塞尔函数前置计算
-            self.njbess = ksup
-            xiu = self.xiperp * self.tbu[self.nptu-1]
-            self.rjbess(xiu)
-            print(f" 阶数：{self.njbess} ， xi*v = {self.xiperp}*{self.tbu[self.nptu-1]}={xiu}")
-
-            if self.njbess <= 1:
-                print(f" 阶数：{self.njbess} ， xi*v = {self.xiperp}*{self.tbu[self.nptu-1]}={xiu}")
-                print(f" 速度点的贝塞尔函数无法在点 {self.redpsi[ipsi]:8.3f} 处计算")
-                print(f" n^2_FW ={self.qnfsq:13.4E} xiperp ={xiperp:13.4E} xiu ={xiu:13.4E}")
-                self.ibreak = 1
-                return
-
-            # 贝塞尔函数
-            for ip in range(self.nptu):
-                u = self.tbu[ip]
-                # 调用准线性系数计算
-                self.qldcoe(u)
-                for k in range(self.ksup + 1):
-                    self.tbdqlk[ip, k] = self.dqlu[k]
-
             # 计算D0和系数
             legsup = 0
             qlnorm = self.qlrate(legsup)
 
-            if qlnorm == 0.0:
-                print("\n Renormalization of D_ql failed, qlnorm =", qlnorm)
-                self.ibreak = 1
-                return
+            if qlnorm <= 0.0:
+                raise ValueError("所选波数和谐波没有正的 RF 吸收，无法匹配正输入功率")
 
             # D0
             self.dqlw = zdqlw / qlnorm
@@ -2222,10 +2200,11 @@ class FP:
 
             # append_to_file(self.output_paths["read"], f"qlnorm = {qlnorm}\n")
             
-            # 为计算扩散功率（26）准备，提前准备
-            for k in range(self.ksup + 1):
-                for ip in range(self.nptu):
-                    self.tbdqlk[ip, k] = self.dqlw * self.tbdqlk[ip, k]
+            # 仅用于旧版逐速度输出：mu=0 处的完整核，不参与功率或矩阵。
+            self.tbdqlk.fill(0.0)
+            self.tbdqlk[:, 0] = self.dqlw * special.jv(
+                self.ipheat - 1, self.xiperp * self.tbu
+            )**2
         else:
             for k in range(self.ksup + 1):
                 for ip in range(self.nptu):
@@ -2255,13 +2234,13 @@ class FP:
         """
         if ipsi == 0:
             # 初始化3点和5点高斯积分的节点和权重
-            self.zg3 = np.array([0.1127016654, 0.5000000000, 0.8872983346])
-            self.wg3 = np.array([0.27777777778, 0.44444444444, 0.27777777778])
+            points, weights = special.roots_legendre(3)
+            self.zg3 = (points + 1.0) / 2.0
+            self.wg3 = weights / 2.0
             
-            self.zg5 = np.array([0.0469100770, 0.2307653449, 0.5000000000,
-                            0.7692346551, 0.9530899230])
-            self.wg5 = np.array([0.1184634425, 0.2393143352, 0.2844444444,
-                            0.2393143352, 0.1184634425])
+            points, weights = special.roots_legendre(5)
+            self.zg5 = (points + 1.0) / 2.0
+            self.wg5 = weights / 2.0
 
             self.ngaus = 3
             self.lgvr = self.legmod + 1
@@ -2357,8 +2336,7 @@ class FP:
         self.fb = np.zeros(self.nfdim)
         self.fmatrx = np.zeros((self.iwdmtr, self.nfdim))
         self.psource = np.zeros(self.nfvrb) # 源项
-        self.nbi_particle_source_moment = 0.0
-        self.nbi_source_power = 0.0
+        self._prepare_nbi_source()
         # self.pwnbi = 0.0
         # self.pwnbi_l = 0.0
 
@@ -2386,29 +2364,13 @@ class FP:
 
                 w = self.xstep * self.wgaus[i]
 
-                # 与弱形式右端使用完全相同的 Gauss 点和源，独立于 ΣE_k sig[k,0]。
-                if self.nbi_enabled:
-                    u = self.tbu[ip] + self.du * self.zgaus[i]
-                    nbi_source = self.source_nbi[0] * self.dnbi
-                    self.nbi_particle_source_moment += 4.0 * np.pi * w * nbi_source
-                    self.nbi_source_power += 4.0 * np.pi * self.zemxw * w * u**2 * nbi_source
-
-                # 添加到Gauss积分的贡献
-                for ipla in range(self.nfvrb):
-                    for iplb in range(self.nfvrb):
-                        for ida in range(2):
-                            for idb in range(2):
-                                fw = w * self.fgamm[ipla, ida, iplb, idb]
-                                for ia in range(2):
-                                    for ib in range(2):
-                                        self.fdiap[ipla, ia, iplb, ib] += \
-                                            fw * self.hl[ia, ida, i] * self.hl[ib, idb, i]
-                                        self.fdiam[ipla, ia, iplb, ib] += \
-                                            fw * self.hr[ia, ida, i] * self.hr[ib, idb, i]
-                                        self.fmixl[ipla, ia, iplb, ib] += \
-                                            fw * self.hl[ia, ida, i] * self.hr[ib, idb, i]
-                                        self.fmixr[ipla, ia, iplb, ib] += \
-                                            fw * self.hr[ia, ida, i] * self.hl[ib, idb, i]
+                # Contract the derivative indices while retaining the nodal
+                # value/derivative ordering used by the banded solver.
+                left, right = self.hl[:, :, i], self.hr[:, :, i]
+                self.fdiap += w * np.einsum('ldme,ad,be->lamb', self.fgamm, left, left)
+                self.fdiam += w * np.einsum('ldme,ad,be->lamb', self.fgamm, right, right)
+                self.fmixl += w * np.einsum('ldme,ad,be->lamb', self.fgamm, left, right)
+                self.fmixr += w * np.einsum('ldme,ad,be->lamb', self.fgamm, right, left)
                                 # if ip<2 and i<2 and ipla<2 and iplb<2:
                                 #     append_to_file(self.output_paths["read"], f"源项高斯系数 fw = {fw}\n")
 
@@ -2427,7 +2389,9 @@ class FP:
                 # 使用高斯积分近似：Σ w_i * S(v_i) * φ(v_i)
                 for ipla in range(self.nfvrb):      # 勒让德阶数n
                     ida = 0                         # 有G(v)的项
-                    sw = w * self.psource[ipla]      # 第n阶的源项
+                    # NBI has its own exact/adaptive Hermite projection below;
+                    # collision quadrature only integrates the smooth background.
+                    sw = w * self.psourc if ipla == 0 else 0.0
                     for ia in range(2):
                         self.uvp[ipla, ia] += sw * self.hl[ia, ida, i]
                         self.uvm[ipla, ia] += sw * self.hr[ia, ida, i]
@@ -2439,6 +2403,9 @@ class FP:
             # append_to_file(self.output_paths["read"], f"源项2  = \n{self.uvm}\n")
 
             
+            self.uvp += self.nbi_element_source_left[ip]
+            self.uvm += self.nbi_element_source_right[ip]
+
             # 边界条件（这里只在速度u=0处,即ip=0时）
             if ip == 0:
                 self.boundf()
@@ -2460,8 +2427,12 @@ class FP:
 
         append_to_file(
             self.output_paths["read"],
-            f"NBI 弱形式粒子源矩（归一化前） = {self.nbi_particle_source_moment:.12e}\n"
-            f"NBI 方程源能量矩（归一化前） = {self.nbi_source_power:.12e} W/cm³\n"
+            f"NBI 弱形式注入粒子矩 = {self.nbi_particle_source_moment:.12e}\n"
+            f"NBI 弱形式热粒子汇矩 = {self.nbi_particle_sink_moment:.12e}\n"
+            f"NBI 净粒子源矩 = {self.nbi_net_particle_source_moment:.12e}\n"
+            f"NBI 注入功率 = {self.nbi_injected_power:.12e} W/cm³\n"
+            f"NBI 热粒子汇功率 = {-self.nbi_sink_power:.12e} W/cm³\n"
+            f"NBI 方程净源能量矩 = {self.nbi_source_power:.12e} W/cm³\n"
         )
         
         # # 计算NBI源功率
@@ -2492,17 +2463,10 @@ class FP:
             fblok: 块矩阵
             lgvr: 勒让德多项式阶数+1
         """
-        ii = 2 * self.nfvrb * (ip)
-        jj = 2 * self.nfvrb * (jp)
-        
-        for ipla in range(self.nfvrb):
-            for ia in range(2):
-                i = ii + 2 * ipla + ia
-                for iplb in range(self.nfvrb):
-                    for ib in range(2):
-                        j = jj + 2 * iplb + ib
-                        k = i - j + self.nfshft
-                        self.fmatrx[k-1, j] += fblok[ipla, ia, iplb, ib]
+        size = 2 * self.nfvrb
+        rows = size * ip + np.arange(size)[:, None]
+        columns = size * jp + np.arange(size)[None, :]
+        self.fmatrx[rows - columns + self.nfshft - 1, columns] += fblok.reshape(size, size)
 
     def addrhs(self, ip, uvblok):
         """Adds to RHS vector."""
@@ -2625,6 +2589,13 @@ class FP:
         # for ipla in range(self.nfvrb):
         #     self.fdiap[ipla, 0, ipla, 0] = 1.0
 
+        # Keep the omitted weak row so particle balance can be checked after
+        # imposing the independent density constraint.
+        self.origin_weak_row = (
+            self.fdiap[0, 0].ravel().copy(),
+            self.fmixl[0, 0].ravel().copy(),
+            float(self.uvp[0, 0]),
+        )
         ia = 0
         for ipla in range(self.nfvrb):
             for iplb in range(self.nfvrb):
@@ -2639,12 +2610,12 @@ class FP:
         #     self.fdiap[ipla, 1, ipla, 1] = 1.0
         
         # RHS for boundary
-        val = self.fb1_mxw if self.fb1_prv == 0.0 else self.fb1_prv
-        self.fb[0] = val
+        self.fb[0] = self.fb1_mxw
+        self.uvp[:, 0] = 0.0
 
         # Zero out rest of node 0 RHS
         for iplb in range(1, self.nfvrb):
-            self.fb[iplb] = 0.0
+            self.fb[2 * iplb] = 0.0
 
     # def boundf(self):
     #     """矩阵中 u=0 时的边界条件."""
@@ -2752,108 +2723,192 @@ class FP:
     
     
 
-    def source(self, u):
-        """计算源项
-        
-        Args:
-            u: 速度参数
-        """
-        self.psourc = 0.0                   # 平衡源项
-        self.psource = np.zeros(self.nfvrb) # 最终的源项
-        self.source_nbi = np.zeros(self.nfvrb) # NBI源项部分
+    def _prepare_nbi_source(self):
+        """Project physical injection and a number-balanced thermal sink onto Hermite elements.
 
+        F integrates to one in d³u and time is normalized to anuref^-1.
+        sig[k,0] = P_k/E_k; consequently T*sig/zemxw is the
+        dimensionless particle-rate Legendre coefficient. Source integration is
+        separate from collision quadrature so a narrow beam is never widened.
+        """
+        shape = (self.nfelem, self.nfvrb, 2)
+        self.nbi_injection_left = np.zeros(shape)
+        self.nbi_injection_right = np.zeros(shape)
+        self.nbi_sink_left = np.zeros((self.nfelem, 2))
+        self.nbi_sink_right = np.zeros((self.nfelem, 2))
+        self.nbi_element_source_left = np.zeros(shape)
+        self.nbi_element_source_right = np.zeros(shape)
+        self.nbi_particle_source_moment = 0.0
+        self.nbi_particle_sink_moment = 0.0
+        self.nbi_net_particle_source_moment = 0.0
+        self.nbi_injected_power = 0.0
+        self.nbi_sink_power = 0.0
+        self.nbi_source_power = 0.0
+        self.pwnbi_l = 0.0
+        self.nbi_particle_injection_rate = 0.0
+        self.nbi_beam_particle_moments = np.zeros(self.Ns)
+        self.nbi_beam_source_powers = np.zeros(self.Ns)
+        self._nbi_sink_norm = 1.0
+        self._nbi_energy_norm = float(erf(8.0 / np.sqrt(2.0)))
+        if not self.nbi_enabled:
+            return
+        if not np.isfinite(self.nbi_energy_spread_ratio) or self.nbi_energy_spread_ratio < 0:
+            raise ValueError("NBI energy_spread_ratio must be finite and nonnegative")
+        if not np.isfinite(self.dnbi) or self.dnbi < 0:
+            raise ValueError("NBI source multiplier must be finite and nonnegative")
+
+        temperature = self.ctx.tempi[self.ispres]
+        nodes, weights = np.polynomial.legendre.leggauss(12)
+        left_energy = np.column_stack((self.tbu[:-1]**2, 2 * self.tbu[:-1]))
+        right_energy = np.column_stack((self.tbu[1:]**2, 2 * self.tbu[1:]))
+        for beam in range(self.Ns):
+            coefficients = temperature * self.sig[beam] * self.dnbi / (4 * np.pi * self.zemxw)
+            if coefficients[0] == 0:
+                continue
+            energy = self.E_nbi_k[beam]
+            spread = self.nbi_energy_spread_ratio * energy
+            if energy > self.tbkev[-1]:
+                raise ValueError("NBI beam energy exceeds the velocity-domain energy; increase energy_range")
+            beam_left = np.zeros((self.nfelem, 2))
+            beam_right = np.zeros((self.nfelem, 2))
+            if spread == 0:
+                speed = self.v_nbi_k[beam]
+                element = min(int(speed / self.du), self.nfelem - 1)
+                z = (speed - self.tbu[element]) / self.du
+                beam_left[element] = [self.herm1(z), self.du * self.herm2(z)]
+                beam_right[element] = [self.herm1(z - 1), self.du * self.herm2(z - 1)]
+            else:
+                if energy - 8 * spread < 0 or energy + 8 * spread > self.tbkev[-1]:
+                    raise ValueError(
+                        "NBI energy Gaussian ±8 sigma must lie within [0, Emax]; "
+                        "increase energy_range or reduce the physical energy spread"
+                    )
+                # Integrate in standardized energy; subdivision prevents a very
+                # narrow Gaussian from being missed by velocity Gauss points.
+                for element in range(self.nfelem):
+                    lo = max(-8.0, (self.tbkev[element] - energy) / spread)
+                    hi = min(8.0, (self.tbkev[element + 1] - energy) / spread)
+                    if lo >= hi:
+                        continue
+                    edges = np.linspace(lo, hi, max(1, int(np.ceil(hi - lo))) + 1)
+                    for lower, upper in zip(edges[:-1], edges[1:]):
+                        t = (lower + upper) / 2 + (upper - lower) * nodes / 2
+                        probability = ((upper - lower) * weights / 2
+                                       * np.exp(-t*t / 2) / np.sqrt(2 * np.pi))
+                        speeds = np.sqrt((energy + spread * t) / temperature)
+                        z = (speeds - self.tbu[element]) / self.du
+                        beam_left[element] += [
+                            np.dot(probability, self.herm1(z)),
+                            self.du * np.dot(probability, self.herm2(z)),
+                        ]
+                        beam_right[element] += [
+                            np.dot(probability, self.herm1(z - 1)),
+                            self.du * np.dot(probability, self.herm2(z - 1)),
+                        ]
+                mass = beam_left[:, 0].sum() + beam_right[:, 0].sum()
+                beam_left /= mass
+                beam_right /= mass
+
+            projected_mass = beam_left[:, 0].sum() + beam_right[:, 0].sum()
+            projected_energy = temperature * (
+                np.sum(beam_left * left_energy) + np.sum(beam_right * right_energy)
+            )
+            if not np.isclose(projected_energy / projected_mass, energy, rtol=1e-11, atol=0):
+                raise RuntimeError("NBI source projection did not preserve the specified mean beam energy")
+            self.nbi_injection_left += beam_left[:, None, :] * coefficients[None, :, None]
+            self.nbi_injection_right += beam_right[:, None, :] * coefficients[None, :, None]
+            self.nbi_beam_particle_moments[beam] = 4 * np.pi * coefficients[0] * projected_mass
+            self.nbi_beam_source_powers[beam] = (
+                4 * np.pi * self.zemxw * coefficients[0] * projected_energy / temperature
+            )
+
+        # The sink is a Maxwellian particle population, so its weak source
+        # contains u². Normalize over the actual finite velocity domain.
+        for element in range(self.nfelem):
+            edges = np.linspace(self.tbu[element], self.tbu[element + 1],
+                                max(1, int(np.ceil(self.du))) + 1)
+            for lower, upper in zip(edges[:-1], edges[1:]):
+                speeds = (lower + upper) / 2 + (upper - lower) * nodes / 2
+                probability = ((upper - lower) * weights / 2
+                               * 4 / np.sqrt(np.pi) * speeds**2 * np.exp(-speeds**2))
+                z = (speeds - self.tbu[element]) / self.du
+                self.nbi_sink_left[element] += [
+                    np.dot(probability, self.herm1(z)),
+                    self.du * np.dot(probability, self.herm2(z)),
+                ]
+                self.nbi_sink_right[element] += [
+                    np.dot(probability, self.herm1(z - 1)),
+                    self.du * np.dot(probability, self.herm2(z - 1)),
+                ]
+        self._nbi_sink_norm = self.nbi_sink_left[:, 0].sum() + self.nbi_sink_right[:, 0].sum()
+        injection_mass = (self.nbi_injection_left[:, 0, 0].sum()
+                          + self.nbi_injection_right[:, 0, 0].sum())
+        sink_scale = injection_mass / self._nbi_sink_norm
+        self.nbi_sink_left *= sink_scale
+        self.nbi_sink_right *= sink_scale
+        self.nbi_element_source_left = self.nbi_injection_left.copy()
+        self.nbi_element_source_right = self.nbi_injection_right.copy()
+        self.nbi_element_source_left[:, 0, :] -= self.nbi_sink_left
+        self.nbi_element_source_right[:, 0, :] -= self.nbi_sink_right
+        self.nbi_particle_source_moment = 4 * np.pi * injection_mass
+        self.nbi_particle_sink_moment = -4 * np.pi * (
+            self.nbi_sink_left[:, 0].sum() + self.nbi_sink_right[:, 0].sum()
+        )
+        self.nbi_net_particle_source_moment = (
+            self.nbi_particle_source_moment + self.nbi_particle_sink_moment
+        )
+        self.nbi_injected_power = 4 * np.pi * self.zemxw * (
+            np.sum(self.nbi_injection_left[:, 0, :] * left_energy)
+            + np.sum(self.nbi_injection_right[:, 0, :] * right_energy)
+        )
+        self.nbi_sink_power = 4 * np.pi * self.zemxw * (
+            np.sum(self.nbi_sink_left * left_energy) + np.sum(self.nbi_sink_right * right_energy)
+        )
+        self.nbi_source_power = self.nbi_injected_power - self.nbi_sink_power
+        self.nbi_particle_injection_rate = (
+            self.nbi_particle_source_moment * self.anuref
+            * self.ctx.dens * self.ctx.aconc[self.ispres] * 1e13
+        )
+        self.pwnbi_l = -self.nbi_sink_power
+
+    def source(self, u):
+        """Continuous weak source u² S/(n_i nu_ref), with v_th³ absorbed in S.
+
+        Zero-width beam deltas are represented by their exact element
+        projections in _prepare_nbi_source, not by pointwise samples here.
+        """
+        self.psourc = 0.0
+        self.psource = np.zeros(self.nfvrb)
+        self.source_nbi = np.zeros(self.nfvrb)
         uu = u * u
-        
-        # append_to_file(self.output_paths["read"], f"粒子{self.ispres}温度  = {self.ctx.tempi[self.ispres]}\n")
         for isp in range(self.nspele):
             if self.ctx.tempi[isp] != self.ctx.tempi[self.ispres]:
-                # append_to_file(self.output_paths["read"], f"粒子{isp}温度  = {self.ctx.tempi[isp]}\n")
-                self.psourc -= (2.0 * self.anuisp[isp] * 
-                            (self.tauisp[isp] - 1.0) *
-                            (self.vthisp[isp] * self.expuab[isp] - 
-                            u * self.phifun[isp]) *
-                            uu * np.exp(-uu) / 5.56832799683)         
-
+                self.psourc -= (
+                    2 * self.anuisp[isp] * (self.tauisp[isp] - 1)
+                    * (self.vthisp[isp] * self.expuab[isp] - u * self.phifun[isp])
+                    * uu * np.exp(-uu) / 5.56832799683
+                )
         self.psource[0] = self.psourc
-        # append_to_file(self.output_paths["read"], f"源项 S = \n{self.psource[0]}\n")
-        
-        # 计算 NBI源项
-        if self.nbi_enabled:
-            # if u> 3.99 and u<4.01:
-            #     append_to_file(self.output_paths["read"], f"速度 v = \n{u}\n")
-            # append_to_file(self.output_paths["read"], f"源项 S = \n{self.psource[0]}\n")
-            for n in range(self.legmod+1):
-                for k in range(self.Ns):
-                    v_nbi = self.v_nbi_k[k]
-                    # 使用高斯近似狄拉克δ函数
-                    # # 使用宽度为 2~3 倍 du 的高斯函数，既保证数值平滑，又保证积分守恒
-                    # sigma_v = 1.5 * self.du  
-                    # delta_v = np.exp(-(u - v_nbi)**2 / (2 * sigma_v**2)) / (sigma_v * np.sqrt(2 * np.pi))
+        if not self.nbi_enabled:
+            return
 
-                    # ================= 【修改】：引入物理能量展宽 =================
-                    # 1. 计算该光束对应的物理能量
-                    E_nbi = self.E_nbi_k[k] # 单位 keV
-                    T_local = self.ctx.tempi[self.ispres] # 局部温度 keV
-                    
-                    # 2. 计算物理能量展宽 (keV)
-                    # sigma_E = 比例 * E_nbi。如果比例为0，则退回纯数值展宽
-                    sigma_E = self.nbi_energy_spread_ratio * E_nbi
-                    
-                    # 3. 将能量展宽转换为归一化速度空间的展宽
-                    # 由 E = u^2 * T_local，求导得 dE = 2 * u * T_local * du
-                    # 因此 sigma_u = sigma_E / (2 * u * T_local)
-                    if v_nbi > 1e-6 and sigma_E > 1e-10:
-                        sigma_v_physical = sigma_E / (2.0 * v_nbi * T_local)
-                    else:
-                        sigma_v_physical = 0.0
-                        
-                    # 4. 确保数值稳定性：取物理展宽和最小数值展宽中的较大者
-                    # 最小数值展宽 (1.5 * du) 保证高斯峰至少跨越2-3个网格，避免数值漏失
-                    sigma_v_numerical = 1.5 * self.du
-                    sigma_v = max(sigma_v_physical, sigma_v_numerical)
-                    # ==============================================================
-                    
-                    # 使用计算出的 sigma_v 构建高斯分布
-                    delta_v = np.exp(-(u - v_nbi)**2 / (2 * sigma_v**2)) / (sigma_v * np.sqrt(2 * np.pi))
-            
-            
-                    # 物理公式：S_n = (delta_v / (2*pi*v_nbi^2)) * sig(k, n)
-                    # 注意：不再乘以 uu 和 anuref！
-                    norm_factor = 1.0 / (2 * np.pi * (v_nbi**2))
-                    S_nbi_n = delta_v * norm_factor * self.sig[k, n]
-                    if n == 0:
-                        S_maxwell_n = (np.exp(-uu) / (2 * np.pi * (v_nbi**2) * 5.56832799683)) * self.sig[k, 0]
-                    else:
-                        S_maxwell_n = 0.0
-
-                    # self.source_nbi[n] += S_nbi_n - S_maxwell_n
-                    self.source_nbi[n] += S_nbi_n
-                
-                # self.source_nbi[n] = self.source_nbi[n]*uu/self.anuref
-                # self.source_nbi[n] = self.source_nbi[n]*uu*self.anuref
-                # if u> 3.99 and u<4.01:
-                    # append_to_file(self.output_paths["read"], f"速度 v = \n{u}\n")
-                    # append_to_file(self.output_paths["read"], f"源项 S = \n{self.psource[0]}\n")
-                    # append_to_file(self.output_paths["read"], f"δ(k) δ({k}) = \n{self.dlk}\n")
-                    # append_to_file(self.output_paths["read"], f"NBI源项 Snbi({n}) = \n{self.source_nbi[n]}\n")
-            # # ============ 诊断代码开始 ============
-            # # 只在 NBI 注入点附近打印（判断高斯峰值是否足够大）
-            # if abs(u - self.v_nbi_k[0]) < 4.0 * self.du: # 打印峰值附近 4 个网格宽度的范围
-            #     print("\n" + "="*60)
-            #     print(f"【NBI 诊断 2：source 函数内部 (u = {u:.4f}, v_nbi = {self.v_nbi_k[0]:.4f})】")
-            #     print(f"  n=0 阶净源项 (注入-背景): {self.source_nbi[0]:.4e}")
-            #     print(f"  n=1 阶推力项 (各向异性):   {self.source_nbi[1]:.4e}  <-- 产生倾斜的关键力")
-            #     if self.legmod >= 2:
-            #         print(f"  n=2 阶挤压项 (垂直分布):   {self.source_nbi[2]:.4e}")
-            #     print("="*60 + "\n")
-            # # ============ 诊断代码结束 ============
-
-            # 最终源项      
-            # 乘以归一化因子 dnbi，强制 NBI 功率等于目标值
-            self.psource[0] = self.psourc + self.source_nbi[0] * self.dnbi
-            # self.psource[0] = self.psourc + self.source_nbi[0] * 1e6
-            for n in range(1, self.legmod+1):
-                self.psource[n] = self.source_nbi[n] * self.dnbi
+        temperature = self.ctx.tempi[self.ispres]
+        for beam in range(self.Ns):
+            spread = self.nbi_energy_spread_ratio * self.E_nbi_k[beam]
+            if spread == 0:
+                continue
+            t = (temperature * uu - self.E_nbi_k[beam]) / spread
+            if abs(t) <= 8:
+                radial_probability = (
+                    2 * temperature * u * np.exp(-t*t / 2)
+                    / (spread * np.sqrt(2 * np.pi) * self._nbi_energy_norm)
+                )
+                self.source_nbi += (
+                    temperature * self.sig[beam] / (4 * np.pi * self.zemxw) * radial_probability
+                )
+        rate = temperature * self.sig[:, 0].sum() / self.zemxw
+        self.source_nbi[0] -= rate * uu * np.exp(-uu) / (np.pi**1.5 * self._nbi_sink_norm)
+        self.psource += self.dnbi * self.source_nbi
 
             # # 诊断打印
             # if abs(u - self.v_nbi_k[0]) < 2.0 * self.du:
@@ -2866,48 +2921,49 @@ class FP:
             # append_to_file(self.output_paths["read"], f"NBI源项 Snbi(1) = \n{self.source_nbi[1]}\n")
     
     def sig_nbi(self):
-        """
-        计算 NBI源项 中粒子功率沉积分布函数的勒让德展开系数
-        σ(k,n) = (n+0.5) * ∫_{-1}^{1} S(μ) * P_n(μ) dμ
-        
-        使用辛普森法则的替代实现
-
-        积分区间[-1, 1]可以转换为2倍的[0, 1]积分
-
-        Returns:
-            无返回值，结果存储在self.sig中
-        """
-        # 初始化结果数组
+        """Project the physical angular source, independently of plotting nodes."""
+        orders = np.arange(self.legmod + 1)
         self.sig = np.zeros((self.Ns, self.legmod + 1))
-        
-        # 预计算辛普森积分的权重
-        simpson_weights = np.ones(self.nmu)
-        simpson_weights[1:-1:2] = 4
-        simpson_weights[2:-1:2] = 2
-        
-        # 对每个NBI束和每个勒让德阶数进行积分
-        for k in range(self.Ns):
-            for n in range(self.legmod+1):
-                # 获取勒让德多项式P_n(μ)在网格点上的值
-                p_n = self.plgcmu[n, :]
-                # 计算被积函数 S(μ) * P_n(μ)
-                integrand = self.S_nbi_ku[k, :] * p_n
-                # 使用辛普森法则进行数值积分
-                integral = self.dxmu / 3 * np.sum(integrand * simpson_weights)
-                # 计算σ(k,n)
-                self.sig[k, n] = (2*n + 1) / 2.0 * integral
-
-        # ============ 诊断代码开始 ============
+        nodes, weights = special.roots_legendre(max(16, (self.legmod + 3) // 2))
+        if self.nbi_file is None:
+            # Work in Gaussian standard deviations so even a source narrower
+            # than the 101-point display grid is integrated without widening.
+            center = self.nbi_mu_center
+            width = self.nbi_sigma
+            lo = max(-10.0, (-1.0 - center) / width)
+            hi = min(10.0, (1.0 - center) / width)
+            edges = np.linspace(lo, hi, max(1, int(np.ceil(hi - lo))) + 1)
+            integrals = np.zeros(self.legmod + 1)
+            for lower, upper in zip(edges[:-1], edges[1:]):
+                t = (lower + upper) / 2 + (upper - lower) * nodes / 2
+                mu = center + width * t
+                quadrature = width * (upper - lower) * weights / 2 * np.exp(-t*t / 2)
+                polynomials = special.eval_legendre(orders[:, None], mu[None, :])
+                integrals += polynomials @ quadrature
+            self.sig = self.nbi_gaussian_beam_weights[:, None] * integrals[None, :]
+        else:
+            # Linear interpolation is the external source's declared angular
+            # representation. Degree L+1 is integrated exactly on each knot span.
+            for interval in range(len(self.nbi_native_mu) - 1):
+                lower = self.nbi_native_mu[interval]
+                upper = self.nbi_native_mu[interval + 1]
+                lo, hi = lower, upper
+                if self.nbi_range_mu == 1:
+                    lo = max(lo, 0.0)
+                elif self.nbi_range_mu == -1:
+                    hi = min(hi, 0.0)
+                if lo >= hi:
+                    continue
+                mu = (lo + hi) / 2 + (hi - lo) * nodes / 2
+                fraction = (mu - lower) / (upper - lower)
+                source = (self.S_nbi_native[:, interval, None] * (1 - fraction)
+                          + self.S_nbi_native[:, interval + 1, None] * fraction)
+                polynomials = special.eval_legendre(orders[:, None], mu[None, :])
+                self.sig += (source * ((hi - lo) * weights / 2)) @ polynomials.T
+        self.sig *= (2 * orders + 1)[None, :] / 2
         if self.nbi_enabled:
-            print("\n" + "="*60)
-            print("【NBI 诊断 1：sig_nbi 展开系数】")
-            print(f"总注入功率积分值 jfz (预期): {4.8 if not hasattr(self, 'jfz_val') else self.jfz_val}")
-            for k in range(self.Ns):
-                print(f"  光束 {k}:")
-                print(f"    sig[0] (n=0, 各向同性粒子数): {self.sig[k, 0]:.4e}")
-                print(f"    sig[1] (n=1, 各向异性推力):   {self.sig[k, 1]:.4e}")
-                print(f"    sig[2] (n=2, 垂直挤压):       {self.sig[k, 2]:.4e}")
-            print("="*60 + "\n")
+            for beam in range(self.Ns):
+                print(f"NBI beam {beam}: angular Legendre coefficients {self.sig[beam, :3]}")
         # ============ 诊断代码结束 ============
 
     def fperfu(self, u):
@@ -2964,27 +3020,45 @@ class FP:
 
 
     def qlcoef(self, u):
-        """Quasilinear coefficients."""
-        self.qldcoe(u)
-        
-        for ln in range(self.legmod + 1):
-            for lm in range(self.legmod + 1):
-                sum00 = 0.0
-                sum01 = 0.0
-                sum11 = 0.0
-                for k in range(self.ksup + 1):
-                    sum00 += self.qleg00[ln, lm, k] * self.dqlu[k]
-                    sum01 += self.qleg01[ln, lm, k] * self.dqlu[k]
-                    sum11 += self.qleg11[ln, lm, k] * self.dqlu[k]
-                
-                self.dql00[ln, lm] = self.dqlw * sum00
-                self.dql01[ln, lm] = self.dqlw * sum01
-                self.dql11[ln, lm] = self.dqlw * sum11
-
-        # qleg 已包含所选捕获权重；这里不再改变耦合，保证与 qlrate 使用同一算子。
+        """Galerkin projection of the complete, nonnegative perpendicular RF kernel."""
+        if self.dqlw == 0.0:
+            self.dql00.fill(0.0)
+            self.dql01.fill(0.0)
+            self.dql11.fill(0.0)
+            return
+        argument = abs(float(self.xiperp * u))
+        if argument > self._ql_max_argument:
+            self.coelgd_with_weight_optimized(
+                enable_weight=self.use_weighted_coelgd, uc=self._ql_uc, a=self._ql_a,
+                max_bessel_argument=max(1.0, 2.0 * argument),
+            )
+        if self._ql_cache_xiperp != self.xiperp:
+            self._ql_coefficient_cache.clear()
+            self._ql_cache_xiperp = self.xiperp
+        key = float(u)
+        coefficients = self._ql_coefficient_cache.get(key)
+        if coefficients is None:
+            weights = self.ql_weights * (1.0 - self.ql_mu**2) * special.jv(
+                self.ipheat - 1, argument * np.sqrt(1.0 - self.ql_mu**2)
+            )**2
+            polynomials = self.ql_polynomials
+            derivatives = self.ql_mu_derivatives
+            coefficients = (
+                (polynomials * weights) @ polynomials.T,
+                (polynomials * weights) @ derivatives.T,
+                (derivatives * weights) @ derivatives.T,
+            )
+            if self._ql_symmetric:
+                for coefficient in coefficients:
+                    coefficient[self._ql_odd_pairs] = 0.0
+            self._ql_coefficient_cache[key] = coefficients
+        self.dql00[:] = self.dqlw * coefficients[0]
+        self.dql01[:] = self.dqlw * coefficients[1]
+        self.dql11[:] = self.dqlw * coefficients[2]
 
     def qldcoe(self, u):
         """计算准线性扩散系数中的贝塞尔函数
+            仅保留旧版展开诊断；求解矩阵与功率使用 qlcoef 的完整核。
             eqn(20)
             计算贝塞尔函数
             输入： u //速度 ipheat //谐波次数p xiperp //垂直 ksup //阶数 legmod //
@@ -3016,32 +3090,32 @@ class FP:
         return
 
     def qlrate(self, legsup):
-        """
-        eqn(26)  4pi*Σ_n*Σ_k* ∫{ v^2* J_n(v)* [Q10_k(n,0) - vQ00_k(n,0)]}dv
-        功率公式函数： 计算扩散功率
-        
-        """
-        
-        self.ipw = 0
-        
-        for ip in range(self.nptu):
-            u = self.tbu[ip]
-            self.auxfun[ip] = 0.0
-            
-            for kk in range(self.ksup + 1):
-                k = self.ksup - kk
-                zterm = 0.0
-                
-                for nn in range(legsup + 1):
-                    n = legsup - nn
-                    zterm = (zterm + 
-                            self.qleg01[0, n, k] * self.tbfu[ip, n] - 
-                            self.qleg00[0, n, k] * u * self.tbdfu[ip, n])
-                
-                self.auxfun[ip] += zterm * self.tbdqlk[ip, k]
-        
-        qlrate = 4.0 * np.pi * self.qlmomu(self.auxfun, self.du, self.nptu, self.ipw)
-        return qlrate
+        """RF energy moment using the same Hermite elements and Gauss rule as matrix()."""
+        if self.dqlw == 0.0:
+            return 0.0
+        rate = 0.0
+        for z, weight in zip(self.zgaus, self.wgaus):
+            # Compute the shapes directly: iniqln also calls this before the
+            # velocity-dependent tables in inimat(1) have been initialized.
+            values = (
+                self.herm1(z) * self.tbfu[:-1, :legsup + 1]
+                + self.du * self.herm2(z) * self.tbdfu[:-1, :legsup + 1]
+                + self.herm1(z - 1.0) * self.tbfu[1:, :legsup + 1]
+                + self.du * self.herm2(z - 1.0) * self.tbdfu[1:, :legsup + 1]
+            )
+            derivatives = (
+                self.dherm1(z) / self.du * self.tbfu[:-1, :legsup + 1]
+                + self.dherm2(z) * self.tbdfu[:-1, :legsup + 1]
+                + self.dherm1(z - 1.0) / self.du * self.tbfu[1:, :legsup + 1]
+                + self.dherm2(z - 1.0) * self.tbdfu[1:, :legsup + 1]
+            )
+            for ip, u in enumerate(self.tbu[:-1] + self.du * z):
+                self.qlcoef(u)
+                rate += self.du * weight * u**2 * (
+                    self.dql01[0, :legsup + 1] @ values[ip]
+                    - u * self.dql00[0, :legsup + 1] @ derivatives[ip]
+                )
+        return 4.0 * np.pi * rate
     
     def diagnose_q01_asymmetry(self):
         """
@@ -3128,50 +3202,75 @@ class FP:
         print("3. 最终方案 (W=1) 的 Q01 严格为 0，因为底层调用了解析递推，并在 qlcoef 中被强制清零！")
         print("="*80 + "\n")
 
-    def coelgd_with_weight_optimized(self, enable_weight=False, uc=0.0, a=0.0, force_pure_numerical=False):
-        """数值积分角向系数，保留配置声明的单侧 W(μ) 权重。
+    def coelgd_with_weight_optimized(self, enable_weight=False, uc=0.0, a=0.0,
+                                     force_pure_numerical=False, max_bessel_argument=0.0):
+        """Build stable angular quadrature and the legacy polynomial diagnostics.
 
-        force_pure_numerical 保留调用兼容性；有权和无权情形均采用相同积分方法。
+        The empirical trapping weight is symmetric by default. It is not a
+        bounce-averaged orbit model. ``directional`` preserves the old signed
+        pitch-angle experiment. The production operator integrates J² directly.
         """
         self.use_weighted_coelgd = enable_weight
+        self._ql_uc = uc
+        self._ql_a = a
+        self._ql_max_argument = abs(float(max_bessel_argument))
+        if self.trapping_model not in ("symmetric", "directional"):
+            raise ValueError(f"Unknown trapping_model: {self.trapping_model}")
+        self._ql_symmetric = not enable_weight or self.trapping_model == "symmetric"
+        orders = np.arange(self.legmod + 1)
+        self._ql_odd_pairs = (orders[:, None] + orders[None, :]) % 2 != 0
 
-        # Simpson 三分之一规则需要偶数个区间。
-        num_points = 501
-        u_vals = np.linspace(-1.0, 1.0, num_points)
-        du = u_vals[1] - u_vals[0]
-        weight = special.expit(a * (u_vals - uc)) if enable_weight else np.ones(num_points)
+        def integrate(order):
+            nodes, quadrature_weights = special.roots_legendre(order)
+            # Split at zero to resolve the absolute-value corner of the
+            # symmetric weight, retaining positive integration weights.
+            mu = np.concatenate(((nodes - 1.0) / 2.0, (nodes + 1.0) / 2.0))
+            weights = np.tile(quadrature_weights / 2.0, 2)
+            if enable_weight:
+                pitch = np.abs(mu) if self.trapping_model == "symmetric" else mu
+                weights *= special.expit(a * (pitch - uc))
+            polynomials = np.array([special.eval_legendre(n, mu) for n in orders])
+            derivatives = np.zeros_like(polynomials)
+            # Gauss nodes exclude the endpoints; this identity avoids the
+            # ill-conditioned monomial derivative used by poly1d.deriv().
+            for n in range(1, self.legmod + 1):
+                derivatives[n] = n * (mu * polynomials[n] - polynomials[n - 1]) / (mu**2 - 1.0)
+            mu_derivatives = mu * derivatives
+            basis_weights = weights * (1.0 - mu**2)**self.ipheat
+            powers = mu[None, :]**(2 * np.arange(self.kamax + 1)[:, None])
+            weighted_powers = basis_weights * powers
+            q00 = np.einsum('ki,li,mi->lmk', weighted_powers, polynomials, polynomials, optimize=True)
+            q01 = np.einsum('ki,li,mi->lmk', weighted_powers, polynomials, mu_derivatives, optimize=True)
+            q11 = np.einsum('ki,li,mi->lmk', weighted_powers, mu_derivatives, mu_derivatives, optimize=True)
+            full_weight = weights * (1.0 - mu**2) * special.jv(
+                self.ipheat - 1, self._ql_max_argument * np.sqrt(1.0 - mu**2)
+            )**2
+            full = (
+                (polynomials * full_weight) @ polynomials.T,
+                (polynomials * full_weight) @ mu_derivatives.T,
+                (mu_derivatives * full_weight) @ mu_derivatives.T,
+            )
+            return mu, weights, polynomials, mu_derivatives, (q00, q01, q11), full
 
-        p_power = 0 if self.ipheat == 1 else 1
-        geo_base = (1.0 - u_vals**2)**(1 + p_power)
-        k_indices = np.arange(self.kamax + 1).reshape(-1, 1)
-        u_powers = u_vals.reshape(1, -1) ** (2 * k_indices)
-        base_weight = weight * geo_base * u_powers
-
-        P_vals = np.zeros((self.legmod + 1, num_points))
-        dP_vals = np.zeros_like(P_vals)
-        for n in range(self.legmod + 1):
-            Pn = legendre(n)
-            P_vals[n, :] = Pn(u_vals)
-            dP_vals[n, :] = Pn.deriv()(u_vals)
-        u_dP_vals = u_vals * dP_vals
-
-        simpson_w = np.ones(num_points)
-        simpson_w[1:-1:2] = 4
-        simpson_w[2:-1:2] = 2
-        base_weight_s = base_weight * (simpson_w * du / 3.0)
-
-        self.qleg00 = np.einsum('ki,li,mi->lmk', base_weight_s, P_vals, P_vals, optimize=True)
-        self.qleg01 = np.einsum('ki,li,mi->lmk', base_weight_s, P_vals, u_dP_vals, optimize=True)
-        self.qleg11 = np.einsum('ki,li,mi->lmk', base_weight_s, u_dP_vals, u_dP_vals, optimize=True)
-
-        if not enable_weight:
-            # 只有 W=1 时才能按奇偶性去除舍入误差；在积分层统一处理，
-            # 使矩阵组装和功率诊断同时使用这些系数。
-            orders = np.arange(self.legmod + 1)
-            odd_pairs = (orders[:, None] + orders[None, :]) % 2 != 0
-            self.qleg00[odd_pairs, :] = 0.0
-            self.qleg01[odd_pairs, :] = 0.0
-            self.qleg11[odd_pairs, :] = 0.0
+        order = max(32, self.legmod + 8, int(np.ceil(2 * self._ql_max_argument)) + 16,
+                    int(np.ceil(abs(a) / 2)) if enable_weight else 0)
+        previous = integrate(order)
+        for _ in range(5):
+            order *= 2
+            current = integrate(order)
+            if all(np.allclose(left, right, rtol=1e-10, atol=1e-11)
+                   for left, right in zip(previous[4] + previous[5], current[4] + current[5])):
+                break
+            previous = current
+        else:
+            raise RuntimeError("RF angular quadrature did not converge; check legmod and trapping parameters")
+        self.ql_mu, self.ql_weights, self.ql_polynomials, self.ql_mu_derivatives = current[:4]
+        self.qleg00, self.qleg01, self.qleg11 = current[4]
+        if self._ql_symmetric:
+            for coefficient in (self.qleg00, self.qleg01, self.qleg11):
+                coefficient[self._ql_odd_pairs, :] = 0.0
+        self._ql_cache_xiperp = self.xiperp
+        self._ql_coefficient_cache = {}
 
     # def coelgd_with_weight_optimized(self, enable_weight=False, uc=0.0, a=0.0):
     #     """
@@ -3643,6 +3742,135 @@ class FP:
     # Post-Processing & Output
     # ===================================================================
 
+    def velocity_moment(self, values, derivatives, power):
+        """Integrate u**power times the actual cubic Hermite FE function."""
+        points, weights = special.roots_legendre(5)
+        z = (points + 1.0) / 2.0
+        u = self.du * (np.arange(len(values) - 1)[:, None] + z)
+        interpolated = (
+            values[:-1, None] * self.herm1(z)
+            + self.du * derivatives[:-1, None] * self.herm2(z)
+            + values[1:, None] * self.herm1(z - 1.0)
+            + self.du * derivatives[1:, None] * self.herm2(z - 1.0)
+        )
+        return float(self.du * np.sum(interpolated * u**power * weights / 2.0))
+
+    def solve_density_constrained(self, banded, rhs):
+        """Fix integral F d³u=1 by the homogeneous solution, keeping S unchanged.
+
+        A constant-density source has zero net particle injection. The origin
+        value is then a free amplitude, not a particle sink. Two banded RHSs
+        impose the density without introducing a dense normalization row.
+        """
+        source_rhs = rhs.copy()
+        source_rhs[0] = 0.0
+        boundary_rhs = np.zeros_like(rhs)
+        boundary_rhs[0] = 1.0
+        solutions = solve_banded(
+            (self.iwd, self.iwd), banded, np.column_stack((source_rhs, boundary_rhs))
+        )
+        coefficients = solutions.reshape(self.nptu, 2 * self.nfvrb, 2)
+        masses = [4.0 * np.pi * self.velocity_moment(
+            coefficients[:, 0, j], coefficients[:, 1, j], 2
+        ) for j in range(2)]
+        if not np.isfinite(masses).all() or abs(masses[1]) < np.finfo(float).tiny:
+            raise RuntimeError("无法施加粒子数约束：齐次解的粒子矩无效")
+        origin_value = (1.0 - masses[0]) / masses[1]
+        self.fb = solutions[:, 0] + origin_value * solutions[:, 1]
+        if not np.isfinite(self.fb).all():
+            raise RuntimeError("稳态求解产生非有限分布")
+        self.fb_store = source_rhs + origin_value * boundary_rhs
+        self.density_constrained = True
+        residual = -self.fb_store.copy()
+        for offset in range(-self.iwd, self.iwd + 1):
+            start = max(0, -offset)
+            stop = min(self.nfdim, self.nfdim - offset)
+            residual[start + offset:stop + offset] += (
+                banded[self.iwd + offset, start:stop] * self.fb[start:stop]
+            )
+        self.matrix_relative_residual = float(
+            np.linalg.norm(residual, np.inf)
+            / max(np.linalg.norm(self.fb_store, np.inf), np.finfo(float).tiny)
+        )
+        return self.fb
+
+    def solve_stationary(self, ipsi):
+        """Solve at fixed density, optionally matching final absorbed RF power."""
+        self.matrix()
+        seed_matrix = self.fmatrx[self.iwd:3 * self.iwd + 1].copy()
+        rhs = self.fb.copy()
+        seed_origin = self.origin_weak_row
+        seed_diffusion = self.dqlw
+        self.power_iterations = 0
+        self.power_relative_residual = 0.0
+        self.density_constrained = False
+
+        if self.rf_power_mode == 'absorbed' and self.icrh_enabled and self.pwdens > 0:
+            if seed_diffusion <= 0 or not np.isfinite(seed_diffusion):
+                raise RuntimeError("正吸收功率需要正的准线性扩散系数")
+            self.dqlw = 0.0
+            self.matrix()
+            collision_matrix = self.fmatrx[self.iwd:3 * self.iwd + 1].copy()
+            collision_origin = self.origin_weak_row
+            ql_matrix = seed_matrix - collision_matrix
+
+            def power_error(scale):
+                self.power_iterations += 1
+                self.dqlw = scale * seed_diffusion
+                self.solve_density_constrained(collision_matrix + scale * ql_matrix, rhs)
+                self.disfun(ipsi)
+                power = self.zemxw * self.qlrate(self.legmod)
+                if not np.isfinite(power):
+                    raise RuntimeError("RF 功率自洽计算产生非有限值")
+                return power / self.pwdens - 1.0
+
+            upper = 1.0
+            error = power_error(upper)
+            for _ in range(20):
+                if error >= 0:
+                    break
+                upper *= 2.0
+                error = power_error(upper)
+            else:
+                raise RuntimeError("当前能域与模型无法达到请求的 RF 吸收功率")
+            scale = brentq(power_error, 0.0, upper, xtol=1e-12,
+                           rtol=self.power_tolerance * 0.1, maxiter=100)
+            self.power_relative_residual = abs(power_error(scale))
+            if self.power_relative_residual > self.power_tolerance:
+                raise RuntimeError("RF 吸收功率迭代未达到要求精度")
+            final_matrix = collision_matrix + scale * ql_matrix
+            self.origin_weak_row = tuple(
+                base + scale * (reference - base)
+                for base, reference in zip(collision_origin, seed_origin)
+            )
+        else:
+            self.dqlw = seed_diffusion
+            self.solve_density_constrained(seed_matrix, rhs)
+            self.disfun(ipsi)
+            self.power_iterations = 1
+            final_matrix = seed_matrix
+            self.origin_weak_row = seed_origin
+
+        self.fmatrx[self.iwd:3 * self.iwd + 1] = final_matrix
+        left, right, origin_rhs = self.origin_weak_row
+        stride = 2 * self.nfvrb
+        self.particle_balance_residual = float(4 * np.pi * (
+            left @ self.fb[:stride] + right @ self.fb[stride:2 * stride] - origin_rhs
+        ))
+        self.density_residual = abs(self.fnorm - 1.0)
+        if np.min(self.tbfu[:, 0]) < -1e-12:
+            raise ValueError(
+                "当前参数和离散设置没有得到非负稳态（各向同性分布为负）；"
+                "请检查网格及恒密度 Maxwell 替换模型的适用性，必要时采用密度演化/粒子损失模型"
+            )
+        append_to_file(
+            self.output_paths['read'],
+            f"密度约束残差 = {self.density_residual:.6e}\n"
+            f"原点弱方程粒子平衡残差 = {self.particle_balance_residual:.6e}\n"
+            f"线性方程相对残差 ||Ax-b||∞/||b||∞ = {self.matrix_relative_residual:.6e}\n"
+            f"RF 功率模式 = {self.rf_power_mode}; 相对误差 = {self.power_relative_residual:.6e}\n"
+        )
+
     def disfun(self, ipsi):
         """Reconstruct distribution function from solution vector fb."""
         print(" fb ", self.fb[:3])
@@ -3658,9 +3886,12 @@ class FP:
         self.raw_tbdfu = self.tbdfu.copy()
 
         # 所有阶使用同一归一化因子，保持角向结构不变。
-        self.fnorm = 4. * np.pi * self.qlmomu(self.tbfu[:, 0], self.du, self.nptu, 0)
-        self.tbfu /= self.fnorm
-        self.tbdfu /= self.fnorm
+        self.fnorm = 4.0 * np.pi * self.velocity_moment(self.tbfu[:, 0], self.tbdfu[:, 0], 2)
+        if not getattr(self, 'density_constrained', False):
+            if not np.isfinite(self.fnorm) or self.fnorm <= 0:
+                raise ValueError("分布的粒子数必须为正且有限")
+            self.tbfu /= self.fnorm
+            self.tbdfu /= self.fnorm
 
         # print(f"保存F(v)至11_Fv.txt")
         # tbfu_new = self.tbfu.copy()
@@ -3780,8 +4011,14 @@ class FP:
         #     if itry < self.itrmax:
         #         return
         
-        # 当前执行一次线性求解；iok 不表示已经通过物理守恒检验。
-        self.iok = 1
+        # Linear, density, particle and energy checks are independent of the
+        # angular/domain convergence checks below.
+        self.iok = int(
+            getattr(self, 'matrix_relative_residual', np.inf) < 1e-8
+            and getattr(self, 'density_residual', np.inf) < 1e-10
+            and abs(getattr(self, 'particle_balance_residual', np.inf)) < 1e-8
+            and abs(self.bulk_power_residual) < 1e-7 * max(1.0, abs(hrate), abs(self.nbi_source_power))
+        )
         self.fb1_prv = self.fb[0]
         
         # 碰撞功率与 hrate 必须使用同一份解，不能再按参考输入功率缩放。
@@ -3798,30 +4035,47 @@ class FP:
 
         
         # 平行和垂直温度
-        etp0 = 4.0 * np.pi * self.qlmomu(self.tbfu[:, 0], self.du, self.nptu, 2) * self.ctx.tempi[self.ispres]
-        etp2 = 4.0 * np.pi * self.qlmomu(self.tbfu[:, 1], self.du, self.nptu, 2) * self.ctx.tempi[self.ispres]
+        temperature = self.ctx.tempi[self.ispres]
+        etp0 = 4.0 * np.pi * self.velocity_moment(self.tbfu[:, 0], self.tbdfu[:, 0], 4) * temperature
+        etp2 = 0.0
+        mean_u_parallel = 0.0
+        if self.legmod >= 1:
+            etp2 = 4.0 * np.pi * self.velocity_moment(self.tbfu[:, 1], self.tbdfu[:, 1], 4) * temperature
+            mean_u_parallel = 4.0 * np.pi / 3.0 * self.velocity_moment(
+                self.tbfu[:, 1], self.tbdfu[:, 1], 3
+            )
         
         etp22 = 0.0
         if self.legmod >= 2:
-            etp22 = 4.0 * np.pi * self.qlmomu(self.tbfu[:, 2], self.du, self.nptu, 2) * self.ctx.tempi[self.ispres] # 这是 f_2 的积分
+            etp22 = 4.0 * np.pi * self.velocity_moment(self.tbfu[:, 2], self.tbdfu[:, 2], 4) * temperature
         
         print(f"勒让德分量积分: etp0={etp0:.4e}, etp1={etp2:.4e}, etp2={etp22:.4e}")
         
         self.htemp = 2.0 * etp0 / 3.0
         self.htperp = (2.0 / 3.0) * (etp0 - etp22 / 5.0)  # 使用 etp22 (f_2)
         self.htpar = (2.0 / 3.0) * (etp0 + 2.0 * etp22 / 5.0) # 使用 etp22 (f_2)
+        self.mean_energy_keV = etp0
+        self.mean_parallel_energy_keV = self.htpar / 2.0
+        self.mean_perpendicular_energy_keV = self.htperp
+        self.mean_parallel_velocity_ms = mean_u_parallel * self.vth[self.ispres] * 1e-2
+        self.thermal_parallel_temperature_keV = self.htpar - 2.0 * temperature * mean_u_parallel**2
 
         # self.htemp = 2.0 * etp0 / 3.0
         # self.htperp = (2.0 / 3.0) * (etp0 - etp2 / 5.0)
         # self.htpar = (2.0 / 3.0) * (etp0 + 2.0 * etp2 / 5.0)
 
         # 常数mu处的分布函数
-        for ip in range(self.nptu):
-            for imu in range(self.nmu):
-                self.tfecmu[ip, imu] = 0.0
-                if self.legmod >= 1:
-                    for n in range(self.legmod + 1):
-                        self.tfecmu[ip, imu] += self.plgcmu[n, imu] * self.tbfu[ip, n]
+        self.tfecmu = self.tbfu @ self.plgcmu
+        self.quality_warnings = []
+        if self.tfecmu.min() < -max(1e-12, self.f_min * 0.01):
+            self.quality_warnings.append("分布有显著负值；需要提高角向/速度分辨率并检查模型适用性")
+        if np.max(self.tfecmu[-1]) >= self.f_min:
+            self.quality_warnings.append("高能尾触及能域上界；需要扩大能域并保持速度分辨率")
+        if not self.iok:
+            self.quality_warnings.append("离散方程、粒子数或功率平衡检验未通过")
+        for warning in self.quality_warnings:
+            append_to_file(self.output_paths['read'], f"物理验证未通过：{warning}\n")
+        self.distribution_checks_passed = not self.quality_warnings
         
         # 平滑处理
         # self._postprocess_tfecmu_tail()
@@ -4198,67 +4452,39 @@ class FP:
             self.tfecmu = np.maximum(self.tfecmu, 1e-30)
     
     def regrid_to_uniform_energy(self):
+        """Build dn/(dE dmu) on a shared keV grid without modifying f(u,mu,psi).
+
+        The stored velocity distribution satisfies integral f d^3u = 1.
+        Since E = T_i u^2, d^3u/(dE dmu) = pi sqrt(E)/T_i^(3/2).
+        Values beyond a local solved energy domain are zero-filled; this remapping
+        does not establish that the physical high-energy tail is converged.
         """
-        将分布函数从速度坐标重映射到统一能量坐标。
-        
-        原数据关系：
-            E = T_psi * v^2
-            原速度网格对所有点相同：v ∈ [0, sqrt(r_E)]
-        
-        重映射后：
-            self.f_v_mu_psi 第一维变为统一能量网格
-            各空间点能量范围统一为 [0, r_E * max(T)]
-        """
-        import numpy as np
-        
-        # 当前 ispres 下所有空间点的温度，形状 (nrdpsi,)
-        temps = self.ztempi[self.ispres, :]
-        
-        # 能量系数
-        r_E = self.r_E_1 if self.ipheat == 1 else self.r_E_2
-        
-        # 统一能量上限：最大温度点决定
-        max_temp = np.max(temps)
-        E_max = r_E * max_temp
-        
-        # 统一能量网格（所有空间点共享）
-        energy_grid = np.linspace(0, E_max, self.nptu)
-        
-        # 原速度网格（所有点相同，不需要循环计算）
-        v_max = np.sqrt(r_E)
-        v_grid_old = np.linspace(0, v_max, self.nptu)
-        
-        # 新分布函数数组
-        new_f = np.zeros_like(self.f_v_mu_psi)
-        
-        for ipsi in range(self.nrdpsi):
-            T = temps[ipsi]
-            
-            # 温度极低时直接置零（避免除零/溢出）
-            if T < 1e-10:
-                new_f[:, :, ipsi] = 0
-                continue
-            
-            # 统一能量映射到该点的本地速度：
-            # v_local = sqrt(E / T)
-            # 当 E > r_E * T 时，v_local > v_max，超出原速度范围
-            v_local = np.sqrt(energy_grid / T)
-            
+        distribution = np.asarray(self.f_v_mu_psi)
+        temperatures = np.asarray(self.ztempi[self.ispres, :], dtype=float)
+        densities = np.asarray(self.zdeni[self.ispres, :], dtype=float) * 1e19
+        if distribution.shape != (self.nptu, self.nmu, self.nrdpsi):
+            raise ValueError("Velocity distribution must have shape (nptu, nmu, nrdpsi)")
+        if (temperatures.shape != (self.nrdpsi,) or densities.shape != (self.nrdpsi,)
+                or not np.all(np.isfinite(temperatures)) or np.any(temperatures <= 0)
+                or not np.all(np.isfinite(densities)) or np.any(densities < 0)):
+            raise ValueError("Selected-species temperatures must be positive and densities nonnegative")
+
+        energy_ratio = self.r_E_1 if self.ipheat == 1 else self.r_E_2
+        velocity = np.linspace(0, np.sqrt(energy_ratio), self.nptu)
+        energy_grid = np.linspace(0, energy_ratio * temperatures.max(), self.nptu)
+        spectrum = np.zeros(distribution.shape, dtype=float)
+        for ipsi, temperature in enumerate(temperatures):
+            local_velocity = np.sqrt(energy_grid / temperature)
+            jacobian = densities[ipsi] * np.pi * np.sqrt(energy_grid) / temperature**1.5
             for imu in range(self.nmu):
-                new_f[:, imu, ipsi] = np.interp(
-                    v_local,              # 目标速度（由统一能量映射而来）
-                    v_grid_old,           # 原速度网格
-                    self.f_v_mu_psi[:, imu, ipsi],
-                    left=0,               # E=0 对应 v=0
-                    right=0               # 超出该点能量上限时，f=0
+                spectrum[:, imu, ipsi] = jacobian * np.interp(
+                    local_velocity, velocity, distribution[:, imu, ipsi], left=0.0, right=0.0
                 )
-        
-        # 保存结果
-        self.f_v_mu_psi = new_f
+
         self.energy_grid = energy_grid
-        self.E_max = E_max
-        self.v_max = v_max          # 保留原速度上限信息
-        
+        self.energy_spectrum_mu_psi = spectrum
+        self.local_energy_limits_keV = energy_ratio * temperatures
+        self.E_max = energy_grid[-1]
         return energy_grid
     # def integrate_over_radius(self):
     #     """
@@ -4562,148 +4788,53 @@ class FP:
             
     #     return N_fast_v_mu, energy_grid
 
-    def integrate_over_radius(self):
-        """计算全局快离子绝对数密度的速度空间分布"""
-        from scipy.integrate import simpson
-        from scipy.interpolate import interp1d
-        import numpy as np
-        
-        if self.f_v_mu_psi is None:
-            print("警告：未找到 3D 分布函数数据，无法进行径向积分。")
-            return None, None
-            
-        energy_grid = self.regrid_to_uniform_energy()
+    def integrate_over_radius(self, dvolume_dpsi=None):
+        """Return a volume-averaged dn/(dE dmu) spectrum and its energy grid.
 
-        print("\n" + "="*60)
-        print("开始执行径向积分，计算全局实际密度分布 (单位: m^-3)...")
-        print("="*60)
-        
-        # 尝试读取eqdsk文件
-        data = None
-        try:
-            import eqdsk
-            from pathlib import Path
-            file_path = Path('./gfile/99896M10_ps.geqdsk')
-            data = eqdsk.file._read_eqdsk(file_path)
-            print("成功读取eqdsk文件")
-        except Exception as e:
-            print(f"警告：无法读取eqdsk文件: {e}")
-            print("将使用简化的柱坐标体积权重")
-        
-        # 检查是单径向点模式还是多径向点模式
-        is_single_point = (self.nrdpsi == 1)
-        
-        if is_single_point:
-            print("检测到单径向点模式，直接返回该点的分布函数。")
-            if hasattr(self, 'zdeni') and self.zdeni.shape[1] >= 1:
-                ne_profile_normalized = self.zdeni[self.nspele-1, 0] 
-                ne_profile_physical = ne_profile_normalized * 1.0e19
-            else:
-                print("警告：未找到电子密度剖面，假设为1.0e19 m^-3")
-                ne_profile_physical = 1.0e19
-            
-            N_fast_v_mu = self.f_v_mu_psi[:, :, 0] * ne_profile_physical
-            
-            print(f"单径向点模式，结果形状: {N_fast_v_mu.shape}")
-            print(f"✅ 结果的物理单位为: m^-3 (真实的快离子数密度)")
-            
-            try:
-                np.savetxt('12_N_fast_v_mu.txt', 
-                            np.column_stack([energy_grid, N_fast_v_mu]), 
-                            header='Energy_grid(eV)  N_fast(v,mu1)  N_fast(v,mu2) ...')
-                print("✅ 全局快离子密度分布已保存为: 12_N_fast_v_mu.txt")
-            except Exception as e:
-                print(f"⚠️ 保存失败: {e}")
-                
-            return N_fast_v_mu, energy_grid
-        
-        # 多径向点模式
-        print("检测到多径向点模式，执行径向积分。")
-        
-        # 计算体积权重
-        if data is not None:
-            try:
-                # 使用eqdsk数据计算体积权重
-                nx = data['nx']
-                nz = data['nz']
-                x = data['x']
-                z = data['z']
-                psi = data['psi']
-                psimag = data['psimag']
-                psibdry = data['psibdry']
-                
-                psinorm = (psi - psimag) / (psibdry - psimag)
-                
-                dx = x[1] - x[0]
-                dz = z[1] - z[0]
-                R, Z = np.meshgrid(x, z)
-                dV = 2 * np.pi * R * dx * dz
-                
-                dpsi_dx = np.gradient(psi, axis=1)
-                dpsi_dz = np.gradient(psi, axis=0)
-                grad_psi = np.sqrt(dpsi_dx**2 + dpsi_dz**2)
-                
-                dV_normalized = dV / grad_psi
-                dV_normalized /= np.sum(dV_normalized)
-                
-                psi_bins = np.linspace(psimag, psibdry, self.nrdpsi+1)
-                weights_vol = np.zeros(self.nrdpsi)
-                
-                for i in range(self.nrdpsi):
-                    mask = (psi >= psi_bins[i]) & (psi < psi_bins[i+1])
-                    weights_vol[i] = np.sum(dV_normalized[mask])
-                    
-                print("使用eqdsk数据计算的体积权重。")
-            except Exception as e:
-                print(f"警告：使用eqdsk计算体积权重失败: {e}")
-                data = None  # 标记为失败
-        
-        if data is None:
-            # 使用简化的柱坐标体积权重
-            if hasattr(self, 'redpsi') and len(self.redpsi) == self.nrdpsi:
-                weights_vol = np.maximum(self.redpsi, 1e-6)
-            else:
-                weights_vol = np.ones(self.nrdpsi)
-            print("使用径向坐标近似权重。")
-        
-        # 获取电子密度剖面
-        if hasattr(self, 'zdeni') and self.zdeni.shape[1] == self.nrdpsi:
-            ne_profile_normalized = self.zdeni[self.nspele-1, :] 
-            ne_profile_physical = ne_profile_normalized * 1.0e19
-            print(f"成功提取电子密度剖面，范围: [{ne_profile_physical.min():.2e}, {ne_profile_physical.max():.2e}] m^-3")
-        else:
-            print("警告：未找到电子密度剖面，将退化为纯体积积分！")
-            ne_profile_physical = np.ones(self.nrdpsi)
-        
-        # 确保 weights_vol 和 redpsi 长度一致
-        if len(weights_vol) != len(self.redpsi):
-            print(f"警告：weights_vol ({len(weights_vol)}) 和 redpsi ({len(self.redpsi)}) 长度不一致，将进行插值对齐。")
-            interp_func = interp1d(self.redpsi, weights_vol, kind='linear', fill_value="extrapolate")
-            weights_vol = interp_func(self.redpsi)
-        
-        total_volume = simpson(weights_vol, x=self.redpsi)
-        if total_volume <= 0:
-            print("错误：计算出的总体积非正，无法归一化。")
+        dvolume_dpsi supplies the physical dV/dpsi at the redpsi nodes. With no
+        weights, redpsi is explicitly treated as normalized minor radius and the
+        cylindrical approximation dV proportional to r dr is used. Only the
+        sampled radial interval is averaged; no unsampled volume is extrapolated.
+        """
+        if self.f_v_mu_psi is None:
             return None, None
-        
-        # 构造被积函数并积分
-        integrand = self.f_v_mu_psi * (ne_profile_physical * weights_vol).reshape(1, 1, -1)
-        numerator = simpson(integrand, x=self.redpsi, axis=2)
-        N_fast_v_mu = numerator / total_volume
-        
-        print(f"径向积分完成。结果形状: {N_fast_v_mu.shape}")
-        print(f"✅ 结果的物理单位为: m^-3 (真实的快离子数密度)")
-        
-        # 保存结果
-        try:
-            np.savetxt('12_N_fast_v_mu.txt', 
-                        np.column_stack([energy_grid, N_fast_v_mu]), 
-                        header='Energy_grid(eV)  N_fast(v,mu1)  N_fast(v,mu2) ...')
-            print("✅ 全局快离子密度分布已保存为: 12_N_fast_v_mu.txt")
-        except Exception as e:
-            print(f"⚠️ 保存失败: {e}")
-            
-        return N_fast_v_mu, energy_grid
+        energy_grid = self.regrid_to_uniform_energy()
+        spectra = self.energy_spectrum_mu_psi
+        if self.nrdpsi == 1:
+            averaged = spectra[:, :, 0].copy()
+            self.radial_weight_model = "single radial point; no volume average"
+        else:
+            radius = np.asarray(self.redpsi, dtype=float)
+            if (radius.shape != (self.nrdpsi,) or not np.all(np.isfinite(radius))
+                    or np.any(np.diff(radius) <= 0)):
+                raise ValueError("Radial coordinates must be finite and strictly increasing")
+            if dvolume_dpsi is None:
+                if np.any(radius < 0):
+                    raise ValueError("Cylindrical radial coordinates must be nonnegative")
+                weights = radius
+                self.radial_weight_model = "cylindrical approximation: dV proportional to r dr"
+            else:
+                weights = np.asarray(dvolume_dpsi, dtype=float)
+                self.radial_weight_model = "explicit dV/dpsi weights"
+            if (weights.shape != (self.nrdpsi,) or not np.all(np.isfinite(weights))
+                    or np.any(weights < 0)):
+                raise ValueError("dV/dpsi weights must be finite, nonnegative, and match redpsi")
+            # Trapezoidal weights remain nonnegative on a nonuniform radial mesh.
+            volume = trapezoid(weights, x=radius)
+            if volume <= 0:
+                raise ValueError("Integrated radial volume weight must be positive")
+            averaged = trapezoid(spectra * weights[None, None, :], x=radius, axis=2) / volume
+
+        self.radial_energy_spectrum = averaged
+        print(f"径向能量谱 dn/(dE dmu) [m^-3 keV^-1]；{self.radial_weight_model}")
+        output = os.path.join(self.current_out_dir, "12_energy_spectrum.txt")
+        np.savetxt(
+            output, np.column_stack((energy_grid, averaged)),
+            header=("Energy_keV  dn_dE_dmu [m^-3 keV^-1] for each mu column\n"
+                    f"selected_species_index={self.ispres}; {self.radial_weight_model}\n"
+                    "Beyond each local solved energy domain: zero-filled, not a convergence claim"),
+        )
+        return averaged, energy_grid
 
     def outfpq(self, ientry):
         """输出处理子程序
@@ -4817,12 +4948,12 @@ class FP:
                             f"T_perp ={self.tavgtx[self.ispres, ipsi]:11.3E} "
                             f"T_par ={self.tavgtz[self.ispres, ipsi]:11.3E}")
 
-                print(f"\n{' '*10}垂直和平行平均能量")
+                print(f"\n{' '*10}垂直和平行二阶矩等效温度")
                 for ipsi in range(self.nrdpsi):
                     print(f" Psi ={self.redpsi[ipsi]:8.3f} T_i ={self.ztempi[self.ispres, ipsi]:11.3E} "
-                        f"E_perp ={self.thtprp[self.ispres, ipsi]:11.3E} "
-                        f"E_par ={self.thtpar[self.ispres, ipsi]:11.3E} "
-                        f"E_tot ={self.thttot[self.ispres, ipsi]:11.3E} keV")
+                        f"T2_perp ={self.thtprp[self.ispres, ipsi]:11.3E} "
+                        f"T2_par ={self.thtpar[self.ispres, ipsi]:11.3E} "
+                        f"T2_tot ={self.thttot[self.ispres, ipsi]:11.3E} keV")
 
             # IDL输出
             if self.idlout != 0:
@@ -4834,9 +4965,9 @@ class FP:
                 print(" ".join(f"{x:11.4E}" for x in self.tavgtx[self.ispres]))
                 print("T_tail, parallel")
                 print(" ".join(f"{x:11.4E}" for x in self.tavgtz[self.ispres]))
-                print("Avg Energy, perp")
+                print("Second-moment equivalent temperature, perp [keV]")
                 print(" ".join(f"{x:11.4E}" for x in self.thtprp[self.ispres]))
-                print("Avg energy, parallel")
+                print("Second-moment equivalent temperature, parallel [keV]")
                 print(" ".join(f"{x:11.4E}" for x in self.thtpar[self.ispres]))
                 print("Avg energy, total")
                 print(" ".join(f"{x:11.4E}" for x in self.thttot[self.ispres]))
@@ -4996,10 +5127,10 @@ class FP:
                     f"Psi_tau ={self.tbpsit[ip]:13.4E} "
                     f"Theta ={self.tbthec[ip]:13.4E}")
 
-            print(f"\n{' '*10}Quasilinear diffusion coefficients")
+            print(f"\n{' '*10}Quasilinear radial diffusion projection D00[0,0]")
             for ip in range(0, self.nptu, self.jmptu):
-                print(f" u ={self.tbu[ip]:7.3f} Dql(u,k) =",
-                    " ".join(f"{x:13.4E}" for x in self.tbdqlk[ip, :self.ksup+1]))
+                self.qlcoef(self.tbu[ip])
+                print(f" u ={self.tbu[ip]:7.3f} D00[0,0] ={self.dql00[0, 0]:13.4E}")
 
 
     def outdis(self, ipsi):
@@ -5120,20 +5251,18 @@ class FP:
 
         self.psinxt = self.psinxt + self.dpsxnt
         if self.hrate == 0.0:
-            print(f"\n {self.hrate}")
-            print("\n 加热率在psi =", psi, "处消失")
-            self.ibreak = 1
+            print("\n ICRH加热率在psi =", psi, "处为零")
         # if self.ibreak != 0:
         #     return
 
         
         append_to_file(self.output_paths["read"], f"\n{' '*8}在psi ={psi:12.3f}处的稳态结果\n")
-        append_to_file(self.output_paths["read"], f"{' '*10}线性加热率        {self.pwdens:13.6E} W/cm3\n")
+        append_to_file(self.output_paths["read"], f"{' '*10}ICRH输入功率      {self.pwdens:13.6E} W/cm3\n")
         append_to_file(self.output_paths["read"], f"{' '*10}准线性加热率      {self.hrate:13.6E} W/cm3\n")
         append_to_file(self.output_paths["read"], f"{' '*10}碰撞损失           {self.pwcoll[1]:13.5E} W/cm3\n")
         append_to_file(self.output_paths["read"], f"{' '*10}          （在麦克斯韦极限下  {self.pwsrce:13.5E} W/cm3）\n")
         append_to_file(self.output_paths["read"], f"{' '*10}NBI束系数标定功率   {self.pwnbi:13.4E} W/cm3\n")
-        append_to_file(self.output_paths["read"], f"{' '*10}NBI参考损失（未加入源） {self.pwnbi_l:13.4E} W/cm3\n")
+        append_to_file(self.output_paths["read"], f"{' '*10}NBI热粒子替换汇功率 {self.pwnbi_l:13.4E} W/cm3\n")
         append_to_file(self.output_paths["read"], f"{' '*10}部分残差（未含NBI源和边界通量） {self.zbalpw:13.4E} W/cm3\n")
 
         append_to_file(self.output_paths["read"], f"{self.pwexch[1, :]}\n")
@@ -5159,7 +5288,7 @@ class FP:
 
         ze = 2.0 * self.emax / self.ttailx
         zcut = 0.5 * (ze + 1.0) * np.exp(-ze)
-        append_to_file(self.output_paths["read"], f"\n{' '*10}平均能量：总      {self.htemp:13.4E} keV\n")
+        append_to_file(self.output_paths["read"], f"\n{' '*10}二阶矩等效温度：总 {self.htemp:13.4E} keV\n")
         append_to_file(self.output_paths["read"], f"{' '*10}    垂直          {self.htperp:13.4E} keV\n")
         append_to_file(self.output_paths["read"], f"{' '*10}    平行          {self.htpar:13.4E} keV\n")
         append_to_file(self.output_paths["read"], f"{' '*10}垂直体温度  {self.ttblkx:13.4E} keV\n")
@@ -5172,7 +5301,7 @@ class FP:
             # Stix分布中的快离子比例
             zavgtz = (1.0 - self.ficonc) * self.ttblkz + self.ficonc * self.ttailz
             print(f"\n{' '*10}快离子比例     {self.ficonc:13.3f}")
-            print(f"{' '*10}估计平行能量    {zavgtz:13.3f} keV")
+            print(f"{' '*10}估计平行温度    {zavgtz:13.3f} keV")
 
         if self.joutql >= 3 and ipsi == self.ipsplf[self.ispres, self.ipheat-1]:
             # 详细测试。为避免过多输出，仅在最大功率密度点进行
@@ -5201,8 +5330,8 @@ class FP:
 
         append_to_file(self.output_paths["case"], 
             f"{' '*2}{psi:.15f}"
-            f"{' '*7}{self.pwexch[1, 0]:.15E}"
-            f"{' '*7}{self.pwexch[1, 2]:.15E}"
+            f"{' '*7}{np.sum(self.pwexch[1, :self.nspele - 1]):.15E}"
+            f"{' '*7}{self.pwexch[1, self.nspele - 1]:.15E}"
 
             f"{' '*7}{self.htemp:.15E}"
             f"{' '*7}{self.htperp:.15E}"
@@ -5254,66 +5383,12 @@ class FP:
                     #     f"f_bmx = {self.fbmaxw[ip, imu]:12.4e}")
 
     def rjbess(self, z):
-        """计算贝塞尔函数
-            self.fjbess
-        Args:
-            z: 输入参数
-            self.njbess: 贝塞尔函数的阶数
-        
-        Returns:
-            self.fjbess: 贝塞尔函数值数组
-        """
-        self.zepsil = 1.0E-7
-        
-        # 初始化
-        if z < -20 or z > 87.0:
-            self.njbess = -1
-            return
-        
-        # 限制阶数范围
-        self.njbess = max(self.njbess, 2)  # 先确保不小于2
-        self.njbess = min(self.njbess, 99)  # 再确保不大于99
-        
-        # 特殊情况：z=0
-        if z == 0.0:
-            self.fjbess[0] = 1.0
-            self.njbess = 1
-            return
-        
-        # 计算最高阶和次高阶的前导项
-        zh = 0.5 * z
-        zte = 1.0
-        nbuff = int(0.5 * abs(z))
-        nmin = max(self.njbess, nbuff)
-        
-        n = 0
-        while True:
-            n += 1
-            ztf = zte
-            zte = zte * zh / n
-            if n <= nmin or abs(zte) >= self.zepsil:
-                continue
-            break
-        
-        njbess = n - 1
-        zhsq = zh * zh
-        zhinv = 1.0 / zh
-        
-        # 两个最高阶函数的级数展开
-        n = njbess + 1
-        self.fjbess[n] = zte * self.zjbsum(zhsq, n)
-        
-        n = njbess
-        self.fjbess[n] = ztf * self.zjbsum(zhsq, n)
-        
-        # 低阶函数的后向递推求值
-        while True:
-            n -= 1
-            self.fjbess[n] = (n + 1) * self.fjbess[n + 1] * zhinv - self.fjbess[n + 2]
-            if n <= 0:
-                break
-        
-        return
+        """Populate the legacy Bessel table with the stable library implementation."""
+        self.njbess = max(int(self.njbess), 2)
+        required = max(self.njbess + 2, self.ipheat + self.ksup + 1)
+        if self.fjbess is None or len(self.fjbess) < required:
+            self.fjbess = np.zeros(required)
+        self.fjbess[:] = special.jv(np.arange(len(self.fjbess)), z)
 
     def zjbsum(self, zhsq, n):
         """计算贝塞尔函数的级数和
@@ -5389,54 +5464,38 @@ class FP:
         #      f(u) is stored in the array TBF
         #  with Simpson method.
         # =====================================================================
-        ip  = ipw + 2
-        nd1 = ndu-1
-        sum_val  = 0.
-
-        if(ip > 0):
-            e2 = 0.
-        else:
-            e2 = tbf[0]
-
-        for n in range(2,nd1+1,2):
-            e0 = e2
-            u  = (n-1)*du
-            e1 = tbf[n-1]*u**ip
-            u  = n*du
-            e2 = tbf[n]*u**ip
-            sum_val  = sum_val  + e0 + 4.*e1 + e2
-
-
-        qlmomu = sum_val *du/3
-        # print("qlmomu is ", qlmomu)
-        return qlmomu
+        u = np.arange(ndu, dtype=float) * du
+        return float(simpson(np.asarray(tbf)[:ndu] * u**(ipw + 2), x=u))
 
     def exchcl(self, isp):
-        """计算碰撞损失
-        
-        Args:
-            isp: 物种索引
-        """
-        self.ipw = 0
-
-        if isp >= 0:
-            # 特定物种isp的损失
-            for ip in range(self.nptu):
-                u = self.tbu[ip]
-                self.auxfun[ip] = (self.tbdfu[ip, 0] + 
-                                2.0 * self.tauisp[isp] * u * 
-                                self.tbfu[ip, 0]) * self.tbphif[ip, isp]
-        else:
-            # 总碰撞损失
-            for ip in range(self.nptu):
-                u = self.tbu[ip]
-                self.auxfun[ip] = (self.tbdfu[ip, 0] * self.tbpsic[ip] + 
-                                2.0 * u * self.tbfu[ip, 0] * 
-                                self.tbpsit[ip])
-
-        exchcl = 4.0 * np.pi * self.qlmomu(self.auxfun, self.du, self.nptu, self.ipw)
-
-        return exchcl
+        """Collisional energy transfer from the assembled Hermite weak form."""
+        integral = 0.0
+        for element in range(self.nfelem):
+            for z, weight in zip(self.zgaus, self.wgaus):
+                u = self.tbu[element] + self.du * z
+                value = (
+                    self.herm1(z) * self.tbfu[element, 0]
+                    + self.du * self.herm2(z) * self.tbdfu[element, 0]
+                    + self.herm1(z - 1) * self.tbfu[element + 1, 0]
+                    + self.du * self.herm2(z - 1) * self.tbdfu[element + 1, 0]
+                )
+                derivative = (
+                    self.dherm1(z) / self.du * self.tbfu[element, 0]
+                    + self.dherm2(z) * self.tbdfu[element, 0]
+                    + self.dherm1(z - 1) / self.du * self.tbfu[element + 1, 0]
+                    + self.dherm2(z - 1) * self.tbdfu[element + 1, 0]
+                )
+                self.fokker(u)
+                if isp >= 0:
+                    diffusion = self.anuisp[isp] * self.phifun[isp]
+                    drag = self.tauisp[isp] * diffusion
+                else:
+                    diffusion = self.psicol
+                    drag = self.psitau
+                integral += self.du * weight * u**2 * (
+                    derivative * diffusion + 2 * u * value * drag
+                )
+        return 4 * np.pi * integral
 
 
     def t4_surfpl(self,psi,ibmod):
@@ -5457,6 +5516,7 @@ class FP:
     def _generate_test_gaussian_nbi(self):
         """生成测试用的单向高斯 NBI 注入分布"""
         self.nbi_in = np.ones((self.ctx.nspec, self.Ns, self.nmu, self.nrdpsi))
+        self.nbi_gaussian_beam_weights = np.ones(self.Ns)
         
         # 【修改】：使用主程序传入的参数
         mu_center = self.nbi_mu_center
@@ -6989,6 +7049,17 @@ class FP:
         lines.append(f"{'-'*10} 径向位置 psi = {self.redpsi[ipsi-1]} {'-'*10}\n")
         lines.append(f"  整体归一化因子 fnorm = {self.fnorm:.12e}\n")
         lines.append(f"  带状矩阵相对残差 = {self.matrix_relative_residual:.6e}\n")
+        if hasattr(self, 'density_residual'):
+            lines.append(f"  密度约束残差 = {self.density_residual:.6e}\n")
+            lines.append(f"  原点弱方程粒子平衡残差 = {self.particle_balance_residual:.6e}\n")
+            lines.append(f"  总功率残差 = {self.bulk_power_residual:.6e} W/cm^3\n")
+            lines.append(f"  实际RF吸收 = {self.hrate:.6e} W/cm^3, 模式 = {self.rf_power_mode}\n")
+            lines.append(f"  分布非负性及能域检查通过 = {self.distribution_checks_passed}\n")
+            for warning in self.quality_warnings:
+                lines.append(f"  需处理：{warning}\n")
+            lines.append(f"  平均总能量 = {self.mean_energy_keV:.6e} keV\n")
+            lines.append(f"  平均平行速度 = {self.mean_parallel_velocity_ms:.6e} m/s\n")
+            lines.append(f"  扣除定向流能的平行温度 = {self.thermal_parallel_temperature_keV:.6e} keV\n")
         min_iE, min_imu = np.unravel_index(np.nanargmin(self.tfecmu), self.tfecmu.shape)
         lines.append(f"  归一化分布最小值 = {self.tfecmu[min_iE, min_imu]:.6e}, "
                      f"E = {self.tbkev[min_iE]:.4f} keV, mu = {self.xmu[min_imu]:.4f}, "
@@ -7006,8 +7077,10 @@ class FP:
 
         # NBI 模式：束能量附近（±5% 窗口）tfecmu 的最大值及对应 E 和 μ
         if self.nbi_enabled:
-            lines.append(f"  方程NBI源能量矩（归一化前） = {self.nbi_source_power:.6e} W/cm^3\n")
-            lines.append(f"  方程NBI源能量矩 / fnorm = {self.nbi_source_power / self.fnorm:.6e} W/cm^3\n")
+            lines.append(f"  NBI实际注入功率 = {self.nbi_injected_power:.6e} W/cm^3\n")
+            lines.append(f"  NBI热粒子替换带走功率 = {self.nbi_sink_power:.6e} W/cm^3\n")
+            lines.append(f"  NBI净源功率 = {self.nbi_source_power:.6e} W/cm^3\n")
+            lines.append(f"  NBI净粒子源矩 = {self.nbi_net_particle_source_moment:.6e}\n")
             raw_distribution = self.raw_tbfu @ self.plgcmu
             for E_beam in np.atleast_1d(self.nbi_energies_keV):
                 idx_E = np.where(np.abs(self.tbkev - E_beam) <= 0.05 * E_beam)[0]
@@ -7275,6 +7348,84 @@ def config_input_files():
 # ===================================================================
 # 读取json配置文件
 # ===================================================================
+def validate_config(para):
+    """Validate physical input at the JSON boundary before mutating species arrays."""
+    if para['nspec'] != 2:
+        raise ValueError("当前剖面接口支持恰好两种离子（nspec=2）")
+    for name, minimum in [('nptu', 3), ('legmod', 2)]:
+        if not isinstance(para[name], int) or isinstance(para[name], bool) or para[name] < minimum:
+            raise ValueError(f"{name} 必须是至少 {minimum} 的整数")
+    if para['ipheat'] not in (1, 2) or para['ispec'] not in (1, 2):
+        raise ValueError("ipheat 和 ispec 只支持 1 或 2")
+    for name in ('ne', 'tempe', 'omega_ci'):
+        if not np.isfinite(para[name]) or para[name] <= 0:
+            raise ValueError(f"{name} 必须是有限正数")
+    for name in ('pwdens', 'kperp'):
+        if not np.isfinite(para[name]) or para[name] < 0:
+            raise ValueError(f"{name} 必须是有限非负数")
+    for name in ('azi', 'atm', 'aconc', 'tempi'):
+        values = np.asarray(para[name], dtype=float)
+        if values.shape != (2,) or not np.isfinite(values).all():
+            raise ValueError(f"{name} 必须包含两种离子的有限值")
+        if np.any(values < 0) or (name != 'aconc' and np.any(values == 0)):
+            raise ValueError(f"{name} 含非物理负值或零值")
+    if para['aconc'][para['ispec'] - 1] <= 0:
+        raise ValueError("被求解物种的浓度必须大于零")
+    if not np.isclose(np.dot(para['azi'], para['aconc']), 1.0, rtol=0, atol=1e-6):
+        raise ValueError("aconc 定义为 ni/ne，必须满足准中性 Σ Zi*aconc_i = 1")
+    nbi = para.get('nbi', {})
+    count = nbi.get('Ns', para['Ns'])
+    if not isinstance(count, int) or count < 1:
+        raise ValueError("Ns 必须是正整数")
+    energies = nbi.get('energies_keV')
+    if energies is None:
+        energies = [nbi.get('energy_base_keV', 90.0)]
+    energies = np.asarray(energies, dtype=float)
+    if energies.shape != (count,) or not np.isfinite(energies).all() or np.any(energies <= 0):
+        raise ValueError("nbi.energies_keV 必须与 Ns 等长并全部为有限正数")
+    for name, default in [('pwdens', 1.0), ('energy_spread_ratio', 0.01)]:
+        value = nbi.get(name, default)
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"nbi.{name} 必须是有限非负数")
+    gaussian = nbi.get('gaussian', {})
+    if (not -1 <= gaussian.get('mu_center', 0.7) <= 1
+            or not np.isfinite(gaussian.get('sigma', 0.07)) or gaussian.get('sigma', 0.07) <= 0):
+        raise ValueError("NBI mu_center 必须在 [-1,1]，sigma 必须大于零")
+    for name in ('fnbi', 'ficrh'):
+        if para[name] not in (0, 1):
+            raise ValueError(f"{name} 必须为 0 或 1")
+    if para.get('frequency_convention', 'rf_hz') not in ('rf_hz', 'cyclotron_hz', 'cyclotron_rad_s'):
+        raise ValueError("frequency_convention 必须是 rf_hz、cyclotron_hz 或 cyclotron_rad_s")
+    if para.get('rf_power_mode', 'absorbed') not in ('absorbed', 'maxwell_reference'):
+        raise ValueError("rf_power_mode 必须是 absorbed 或 maxwell_reference")
+    trapping = para.get('trapping', {})
+    if trapping.get('model', 'symmetric') not in ('symmetric', 'directional'):
+        raise ValueError("trapping.model 必须是 symmetric 或 directional")
+    critical = trapping.get('ucr', 0.4)
+    steepness = trapping.get('a', 20.0)
+    lower = 0 if trapping.get('model', 'symmetric') == 'symmetric' else -1
+    if not lower <= critical <= 1 or not np.isfinite(steepness) or steepness < 0:
+        raise ValueError("trapping 的 ucr 或 a 不在支持范围内")
+    for name, default in [('r_E_1', 200.0), ('r_E_2', 100.0)]:
+        value = para.get('energy_range', {}).get(name, default)
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"energy_range.{name} 必须为有限正数")
+    if para.get('plot_settings', {}).get('type', 4) not in (0, 1, 3, 4):
+        raise ValueError("plot_settings.type 支持 0、1、3、4；μ平均图尚未实现")
+    if para.get('input_mode', {}).get('case_mode', 0) not in (0, 1):
+        raise ValueError("input_mode.case_mode 必须是 0 或 1")
+    radii = np.asarray(para.get('input_mode', {}).get('ipsii', [0.2667]), dtype=float)
+    if (radii.ndim != 1 or len(radii) == 0 or not np.isfinite(radii).all()
+            or np.any(radii < 0) or np.any(radii > 1) or np.any(np.diff(radii) <= 0)):
+        raise ValueError("input_mode.ipsii 必须为 [0,1] 内递增的归一化小半径 rho")
+    if para.get('input_mode', {}).get('case_mode', 0) == 0 and len(radii) != 1:
+        raise ValueError("单径向点模式必须恰好提供一个 ipsii")
+    if nbi.get('use_external_file', False):
+        source = nbi.get('source_file')
+        if not source or not os.path.isfile(source):
+            raise ValueError("启用外部 NBI 源时必须提供存在的 source_file")
+
+
 def read_config_file(config_file):
     """
     读取配置文件
@@ -7289,6 +7440,14 @@ def read_config_file(config_file):
 
     with open(config_file, 'r') as f:
         para = json.load(f)
+
+    # External files are relative to the configuration, not the invocation cwd.
+    if para.get('nbi', {}).get('use_external_file', False):
+        for key in ('source_file', 'power_profile_file'):
+            value = para['nbi'].get(key)
+            if value:
+                para['nbi'][key] = os.path.abspath(os.path.join(os.path.dirname(config_file), value))
+    validate_config(para)
 
     # # 添加电子参数
     rmhme = 1836.15
@@ -7316,7 +7475,7 @@ def read_config_file(config_file):
 
     nbi_enabled = para['fnbi']      # NBI功能启用标志，1为开启
     icrh_enabled = para['ficrh']    # ICRH功能启用标志，1为开启
-    Ns = para['Ns']                 # NBI模型光束数量
+    Ns = para.get('nbi', {}).get('Ns', para['Ns'])
     # nbi_file = para.get('nbi_file', None)   # 从配置文件读取 NBI 文件路径，如果没写则默认为 None
 
     ctx = ExternalContext( nspec, tempi, azi, atm, aconc,dens )
@@ -7343,6 +7502,9 @@ def apply_config_settings(ssp, para):
         ipsii (list): 径向位置列表（多径向点模式下使用）
         run_modes (list): 运行的加热模式列表
     """
+    ssp.frequency_convention = para.get('frequency_convention', 'rf_hz')
+    ssp.rf_power_mode = para.get('rf_power_mode', 'absorbed')
+    ssp.plot_enabled = bool(para.get('plot', True))
     # ---- 1. NBI 设置 ----
     nbi_cfg = para.get('nbi', {})
     ssp.pwdens_nbi = nbi_cfg.get('pwdens', 1.0)          # NBI功率密度，单位W/cm^3
@@ -7375,6 +7537,7 @@ def apply_config_settings(ssp, para):
     ssp.enable_trapping = trapping_cfg.get('enabled', 1)  # 1：开启 0：关闭
     ssp.trapping_ucr = trapping_cfg.get('ucr', 0.4)       # Sigmoid 权重的临界俯仰角 uc
     ssp.trapping_a = trapping_cfg.get('a', 20.0)          # Sigmoid 权重的陡度参数 a
+    ssp.trapping_model = trapping_cfg.get('model', 'symmetric')
 
     # ---- 3. 能量范围系数 ----
     er_cfg = para.get('energy_range', {})
@@ -7559,281 +7722,74 @@ def append_to_file(filename, content):
 # ===================================================================
 # 输出径向归一化密度分布图
 # ===================================================================
-def plot_radial_distribution_with_contours(ssp, mode='NBI', 
-                                         show_nbi_contour=True, 
+def plot_radial_distribution_with_contours(ssp, mode='NBI',
+                                         show_nbi_contour=True,
                                          show_nbi_marker=True,
-                                         show_icrh_contour=True, 
+                                         show_icrh_contour=True,
                                          show_icrh_marker=True,
                                          highlight_nbi_peak=True):
-    """
-    绘制径向归一化的密度分布图，并添加轮廓和标记线
-    
-    参数:
-    ssp: 模拟结果对象
-    mode: 当前模式 ('NBI', 'ICRH', 或 'Synergy')
-    show_nbi_contour: 是否显示NBI轮廓线
-    show_nbi_marker: 是否显示NBI标记点
-    show_icrh_contour: 是否显示ICRH轮廓线
-    show_icrh_marker: 是否显示ICRH标记点
-    highlight_nbi_peak: 是否重点突出显示NBI束压能量处的分布
-    """
-    import matplotlib.pyplot as plt
-    import numpy as np
-    from matplotlib.colors import LogNorm, LinearSegmentedColormap
-    import os
-    
-    # 创建图形
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-    
-    # 计算径向积分后的分布，现在返回两个值
-    f_2d_result, energy_grid = ssp.integrate_over_radius()
-    if f_2d_result is None or energy_grid is None:
-        print("无法计算径向积分分布")
-        return fig, ax
-    
-    # 保存原始tfecmu，以便恢复
-    original_tfecmu = ssp.tfecmu.copy() if hasattr(ssp, 'tfecmu') else None
-    
-    # 临时将积分结果赋给 tfecmu
-    # ssp.tfecmu = f_2d_result
-    
-    # 使用返回的能量网格，而不是重新计算
-    Es = energy_grid  # 直接使用integrate_over_radius返回的能量网格
-    # f = ssp.tfecmu.copy()
-    f = f_2d_result.copy()  # 使用integrate_over_radius返回的分布函数结果
-    fmax = ssp.f_max/1000
-    fmin = ssp.f_min/1000
-    f[f < fmax] = np.nan
-    f[f < fmin] = np.nan
-    
-    # 根据highlight_nbi_peak参数决定是否使用权重矩阵
-    if highlight_nbi_peak and hasattr(ssp, 'nbi_energies_keV') and ssp.nbi_energies_keV is not None:
-        # 使用最高的NBI能量作为参考
-        max_nbi_energy = max(ssp.nbi_energies_keV)
-        
-        # 找到最接近NBI束压能量的点
-        nbi_energy_idx = np.argmin(np.abs(Es - max_nbi_energy))
-        
-        # 获取NBI束压能量处的最大密度值
-        nbi_peak_density = np.max(f[nbi_energy_idx])
-        
-        # 创建一个权重矩阵，突出NBI束压能量处的密度
-        weight_matrix = np.ones_like(f)
-        
-        # 在NBI束压能量附近增加权重
-        energy_range = max_nbi_energy * 0.2  # 取NBI能量的20%作为范围
-        for i, energy in enumerate(Es):
-            if abs(energy - max_nbi_energy) <= energy_range:
-                # 在NBI能量附近使用高斯权重
-                distance = abs(energy - max_nbi_energy) / energy_range
-                weight = np.exp(-2 * distance**2)  # 高斯权重
-                weight_matrix[i] = 1 + 2 * weight  # 最多增加3倍权重
-        
-        # 应用权重到原始数据
-        f_weighted = f * weight_matrix
-        
-        # 设置颜色映射范围
-        vmax = nbi_peak_density * 3  # 设置最大值为NBI峰值的3倍
-        vmin = vmax / 1e8  # 使用固定的vmin配置
-        
-        # 保存处理后的数据
-        if mode == 'NBI':
-            ssp.nbi_f_processed = f_weighted.copy()
-        elif mode == 'ICRH':
-            ssp.icrh_f_processed = f_weighted.copy()
-        
-        # 自定义颜色映射，增强NBI束压能量处的显示效果
-        colors = [(1, 1, 1), (0.7, 0.7, 1), (1, 0, 0), (0, 0, 0)]
-        cm_heat = LinearSegmentedColormap.from_list('wbrk', colors, N=100)
-        
-        # 使用加权后的数据绘制热力图
-        pcm = plt.pcolormesh(Es, ssp.xmu, f_weighted.T, cmap=cm_heat, shading='auto', 
-                            norm=LogNorm(vmin=vmin, vmax=vmax))
-        
-        # 添加标题说明
-        # title_suffix = " (NBI Peak Highlighted)" if highlight_nbi_peak else ""
-        # plt.title(f'{mode} Mode - Radially Integrated Distribution (P={ssp.pwdens} W/cm^3){title_suffix}', 
-        #          fontsize=16)
-        
-        # 从加权后的数据中提取轮廓
-        f_processed = f_weighted
-    else:
-        # 不使用权重，直接使用原始数据
-        f_weighted = f
-        vmax = np.max(f[~np.isnan(f)]) if len(f[~np.isnan(f)]) > 0 else 1.0
-        vmin = vmax / 1e8  # 使用固定的vmin配置
-        
-        # 保存处理后的数据
-        if mode == 'NBI':
-            ssp.nbi_f_processed = f.copy()
-        elif mode == 'ICRH':
-            ssp.icrh_f_processed = f.copy()
-        
-        # 使用标准颜色映射
-        colors = [(1, 1, 1), (1, 1, 0), (1, 0, 0), (0, 0, 0)]
-        cm_heat = LinearSegmentedColormap.from_list('wy_rk', colors, N=100)
-        
-        # 使用原始数据绘制热力图
-        pcm = plt.pcolormesh(Es, ssp.xmu, f.T, cmap=cm_heat, shading='auto', 
-                            norm=LogNorm(vmin=vmin, vmax=vmax))
-        
-        # plt.title(f'{mode} Mode - Radially Integrated Distribution (P={ssp.pwdens} W/cm^3)', fontsize=16)
-        
-        # 使用原始数据
-        f_processed = f
-    
-    # 添加颜色条
-    cbar = plt.colorbar(pcm, shrink=0.8, pad=0.02)
-    cbar.set_label('f', fontsize=16)
-    
-    plt.xlabel('E [keV]', fontsize=20)
-    plt.ylabel(r'$\mu$', fontsize=20)
-    plt.ylim(ssp.mu_min, ssp.mu_max)
-    plt.grid(True, linestyle='--', alpha=0.5)
-    
-    # 添加NBI能量参考线
-    if hasattr(ssp, 'nbi_energies_keV') and ssp.nbi_energies_keV is not None:
-        for energy in ssp.nbi_energies_keV:
-            plt.axvline(x=energy, color='blue', linestyle='--', alpha=0.3, linewidth=1)
-    
-    # 创建能量和mu的网格
-    E_grid, mu_grid = np.meshgrid(Es, ssp.xmu)
-    
-    # 设置轮廓线级别
-    if mode == 'Synergy':
-        # 在协同模式下，需要显示三种轮廓
-        # 1. NBI轮廓（只使用vmin级别）
-        if show_nbi_contour and hasattr(ssp, 'nbi_f_processed'):
-            nbi_contour_levels = [vmin]
-            nbi_contours = plt.contour(E_grid, mu_grid, ssp.nbi_f_processed.T, 
-                                     levels=nbi_contour_levels, colors='blue', 
-                                     linewidths=2, alpha=0.6, linestyles='--')
-            plt.clabel(nbi_contours, inline=True, fontsize=8, fmt='%.2e')
-        
-        # 2. ICRH轮廓（只使用vmin级别）
-        if show_icrh_contour and hasattr(ssp, 'icrh_f_processed'):
-            icrh_contour_levels = [vmin]
-            icrh_contours = plt.contour(E_grid, mu_grid, ssp.icrh_f_processed.T, 
-                                      levels=icrh_contour_levels, colors='red', 
-                                      linewidths=2, alpha=0.6, linestyles='--')
-            plt.clabel(icrh_contours, inline=True, fontsize=8, fmt='%.2e')
-        
-        # 3. 协同模式轮廓（使用多个级别）
-        # synergy_contour_levels = sorted([vmax * factor for factor in [0.2, 0.4, 0.6, 0.8]])
-        # synergy_contour_levels = [vmin]
-        # synergy_contours = plt.contour(E_grid, mu_grid, f_processed.T, 
-        #                              levels=synergy_contour_levels, colors='green', 
-        #                              linewidths=2, alpha=0.8)
-        # plt.clabel(synergy_contours, inline=True, fontsize=8, fmt='%.2f')
-    else:
-        # 在NBI或ICRH模式下，只显示当前模式的轮廓（使用vmin级别）
-        contour_levels = [vmin]
-        
-        if mode == 'NBI' and show_nbi_contour:
-            nbi_contours = plt.contour(E_grid, mu_grid, f_processed.T, 
-                                     levels=contour_levels, colors='blue', 
-                                     linewidths=2, alpha=0.8)
-            plt.clabel(nbi_contours, inline=True, fontsize=8, fmt='%.2e')
-        
-        if mode == 'ICRH' and show_icrh_contour:
-            icrh_contours = plt.contour(E_grid, mu_grid, f_processed.T, 
-                                      levels=contour_levels, colors='red', 
-                                      linewidths=2, alpha=0.8)
-            plt.clabel(icrh_contours, inline=True, fontsize=8, fmt='%.2e')
-    
-    # 添加特征点标记
-    if mode == 'Synergy':
-        # 协同模式下的特征点标记
-        if show_nbi_marker and hasattr(ssp, 'nbi_f_processed'):
-            # 使用NBI数据的vmin轮廓线
-            nbi_contours = plt.contour(E_grid, mu_grid, ssp.nbi_f_processed.T, 
-                                     levels=[vmin], colors='blue', 
-                                     linewidths=2, alpha=0.6)
-            if nbi_contours:
-                path = nbi_contours.get_paths()[0]
-                vertices = path.vertices
-                if len(vertices) > 0:
-                    max_energy_idx = np.argmax(vertices[:, 0])
-                    # 修改NBI标记点样式，添加白色边缘，增强对比度
-                    plt.plot(vertices[max_energy_idx, 0], vertices[max_energy_idx, 1], 
-                           'o', markersize=12, markerfacecolor='blue', 
-                           markeredgecolor='white', markeredgewidth=2, 
-                           label='NBI Characteristic Point', zorder=10)
-        
-        if show_icrh_marker and hasattr(ssp, 'icrh_f_processed'):
-            # 使用ICRH数据的vmin轮廓线
-            icrh_contours = plt.contour(E_grid, mu_grid, ssp.icrh_f_processed.T, 
-                                      levels=[vmin], colors='red', 
-                                      linewidths=2, alpha=0.6)
-            if icrh_contours:
-                path = icrh_contours.get_paths()[0]
-                vertices = path.vertices
-                if len(vertices) > 0:
-                    # max_energy_idx = np.argmax(vertices[:, 0])
-                    # plt.plot(vertices[max_energy_idx, 0], vertices[max_energy_idx, 1], 
-                    #        'ro', markersize=10, label='ICRH Characteristic Point')
-                    max_E = np.max(vertices[:, 0])
-                    max_E_indices = np.where(vertices[:, 0] == max_E)[0]
-                    max_energy_idx = max_E_indices[-1]  # 取最后一个最大值的索引
-                    # 修改ICRH标记点样式，使用星形标记，添加白色边缘，增强对比度
-                    plt.plot(vertices[max_energy_idx, 0], vertices[max_energy_idx, 1], 
-                           '*', markersize=15, markerfacecolor='red', 
-                           markeredgecolor='white', markeredgewidth=2, 
-                           label='ICRH Characteristic Point', zorder=10)
+    """Plot the physical dn/(dE dmu) spectrum without changing its amplitude.
 
-    else:
-        # NBI或ICRH模式下的特征点标记
-        if mode == 'NBI' and show_nbi_marker:
-            nbi_contours = plt.contour(E_grid, mu_grid, f_processed.T, 
-                                     levels=[vmin], colors='blue', 
-                                     linewidths=2, alpha=0.8)
-            
-            if nbi_contours:
-                path = nbi_contours.get_paths()[0]
-                vertices = path.vertices
-                if len(vertices) > 0:
-                    max_energy_idx = np.argmax(vertices[:, 0])
-                    # 修改NBI标记点样式，添加白色边缘，增强对比度
-                    plt.plot(vertices[max_energy_idx, 0], vertices[max_energy_idx, 1], 
-                           'o', markersize=12, markerfacecolor='blue', 
-                           markeredgecolor='white', markeredgewidth=2, 
-                           label='NBI Characteristic Point', zorder=10)
-        
-        if mode == 'ICRH' and show_icrh_marker:
-            icrh_contours = plt.contour(E_grid, mu_grid, f_processed.T, 
-                                      levels=[vmin], colors='red', 
-                                      linewidths=2, alpha=0.8)
-            if icrh_contours:
-                path = icrh_contours.get_paths()[0]
-                vertices = path.vertices
-                if len(vertices) > 0:
-                    # max_energy_idx = np.argmax(vertices[:, 0])
-                    # plt.plot(vertices[max_energy_idx, 0], vertices[max_energy_idx, 1], 
-                    #        'ro', markersize=10, label='ICRH Characteristic Point')
-                    max_E = np.max(vertices[:, 0])
-                    max_E_indices = np.where(vertices[:, 0] == max_E)[0]
-                    max_energy_idx = max_E_indices[-1]  # 取最后一个最大值的索引
-                    # 修改ICRH标记点样式，使用星形标记，添加白色边缘，增强对比度
-                    plt.plot(vertices[max_energy_idx, 0], vertices[max_energy_idx, 1], 
-                           '*', markersize=15, markerfacecolor='red', 
-                           markeredgecolor='white', markeredgewidth=2, 
-                           label='ICRH Characteristic Point', zorder=10)
-    
-    
-    # 如果有任何轮廓或标记线，显示图例
-    if (show_nbi_contour or show_nbi_marker or show_icrh_contour or show_icrh_marker):
-        plt.legend(loc='upper right', fontsize=12)
-    
-    # 保存图片
-    int_fig_path = os.path.join(ssp.current_out_dir, f"{mode}_Integrated_2D_Heatmap.png")
-    plt.savefig(int_fig_path, dpi=300, bbox_inches='tight')
-    print(f"✅ {mode}模式积分后热力图已保存: {int_fig_path}")
-    plt.close()
-    
-    # 恢复原始数据
-    if original_tfecmu is not None:
-        ssp.tfecmu = original_tfecmu
-    
+    highlight_nbi_peak adds an energy band only; it never multiplies the
+    spectrum. Negative values are retained in data and masked only for LogNorm.
+    """
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    spectrum, energy = ssp.integrate_over_radius()
+    if spectrum is None:
+        return fig, ax
+    positive = spectrum[np.isfinite(spectrum) & (spectrum > 0)]
+    vmax = float(positive.max()) if positive.size else 1.0
+    vmin = vmax / 1e8
+    display = np.ma.masked_where(~np.isfinite(spectrum) | (spectrum <= 0), spectrum)
+    pcm = ax.pcolormesh(energy, ssp.xmu, display.T, cmap='inferno', shading='auto',
+                        norm=LogNorm(vmin=vmin, vmax=vmax))
+    colorbar = fig.colorbar(pcm, ax=ax, shrink=0.8, pad=0.02)
+    colorbar.set_label(r'$dn/(dE\,d\mu)$ [m$^{-3}$ keV$^{-1}$]', fontsize=14)
+    ax.set(xlabel='E [keV]', ylabel=r'$\mu$', ylim=(ssp.mu_min, ssp.mu_max))
+    ax.set_title(f'{mode}: {ssp.radial_weight_model}', fontsize=11)
+
+    if not hasattr(ssp, 'radial_spectra_by_mode'):
+        ssp.radial_spectra_by_mode = {}
+    ssp.radial_spectra_by_mode[mode] = (energy.copy(), ssp.xmu.copy(), spectrum.copy())
+    if mode in ('NBI', 'ICRH'):
+        setattr(ssp, f'{mode.lower()}_f_processed', spectrum.copy())
+
+    beams = getattr(ssp, 'nbi_energies_keV', None)
+    if beams is not None:
+        for beam in beams:
+            ax.axvline(beam, color='cyan', linestyle='--', alpha=0.4, linewidth=1)
+        if highlight_nbi_peak and len(beams):
+            beam = max(beams)
+            ax.axvspan(0.8 * beam, 1.2 * beam, facecolor='none', edgecolor='cyan',
+                       linewidth=1, linestyle=':', label='NBI energy band')
+
+    overlay_options = [('NBI', show_nbi_contour, show_nbi_marker, 'cyan', 'o'),
+                       ('ICRH', show_icrh_contour, show_icrh_marker, 'lime', '*')]
+    for overlay_mode, show_contour, show_marker, color, marker in overlay_options:
+        if mode != 'Synergy' and mode != overlay_mode:
+            continue
+        stored = ssp.radial_spectra_by_mode.get(overlay_mode)
+        if stored is None or not (show_contour or show_marker):
+            continue
+        overlay_energy, overlay_mu, overlay = stored
+        if not np.nanmin(overlay) < vmin < np.nanmax(overlay):
+            continue
+        contours = ax.contour(overlay_energy, overlay_mu, overlay.T, levels=[vmin],
+                              colors=[color], linewidths=1.5,
+                              alpha=0.7 if show_contour else 0.0)
+        vertices = [path.vertices for path in contours.get_paths() if path.vertices.size]
+        if show_marker and vertices:
+            points = np.concatenate(vertices)
+            point = points[np.argmax(points[:, 0])]
+            ax.plot(point[0], point[1], marker=marker, color=color, markeredgecolor='white',
+                    markersize=10, label=f'{overlay_mode} spectrum contour end')
+
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, labels, loc='upper right', fontsize=10)
+    path = os.path.join(ssp.current_out_dir, f'{mode}_Integrated_2D_Heatmap.png')
+    fig.savefig(path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
     return fig, ax
 
 
@@ -7841,79 +7797,11 @@ def plot_radial_distribution_with_contours(ssp, mode='NBI',
 # 在主程序中调用这个函数，绘制不同模式下径向归一化的密度分布图
 # ===================================================================
 def plot_all_modes(ssp, run_folder, show_nbi_in_synergy=True, show_icrh_in_synergy=True):
-    """
-    绘制所有模式的径向归一化密度分布图
-    
-    参数:
-    ssp: 模拟结果对象
-    run_folder: 结果保存文件夹
-    show_nbi_in_synergy: 在协同模式下是否显示NBI轮廓和标记线
-    show_icrh_in_synergy: 在协同模式下是否显示ICRH轮廓和标记线
-    """
-    import os
-    import matplotlib.pyplot as plt
-    
-    # 创建保存图片的文件夹
-    plots_folder = os.path.join(run_folder, "plots")
-    os.makedirs(plots_folder, exist_ok=True)
-    
-    # 1. 绘制NBI模式分布图
-    print("绘制NBI模式分布图...")
-    nbi_folder = os.path.join(run_folder, "1_NBI_only")
-    nbi_output_path = os.path.join(nbi_folder, "NBI_results.h5")
-    
-    # 加载NBI结果
-    if os.path.exists(nbi_output_path):
-        # 这里假设你有加载结果的方法
-        # ssp.load_results(nbi_output_path)
-        pass
-    
-    # 绘制NBI模式分布图
-    fig, ax = plot_radial_distribution_with_contours(ssp, mode='NBI')
-    nbi_plot_path = os.path.join(plots_folder, "NBI_distribution.png")
-    plt.savefig(nbi_plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"NBI模式分布图已保存: {nbi_plot_path}")
-    
-    # 2. 绘制ICRH模式分布图
-    print("绘制ICRH模式分布图...")
-    icrh_folder = os.path.join(run_folder, "2_ICRH_only")
-    icrh_output_path = os.path.join(icrh_folder, "ICRH_results.h5")
-    
-    # 加载ICRH结果
-    if os.path.exists(icrh_output_path):
-        # 这里假设你有加载结果的方法
-        # ssp.load_results(icrh_output_path)
-        pass
-    
-    # 绘制ICRH模式分布图
-    fig, ax = plot_radial_distribution_with_contours(ssp, mode='ICRH')
-    icrh_plot_path = os.path.join(plots_folder, "ICRH_distribution.png")
-    plt.savefig(icrh_plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"ICRH模式分布图已保存: {icrh_plot_path}")
-    
-    # 3. 绘制协同模式分布图
-    print("绘制协同模式分布图...")
-    synergy_folder = os.path.join(run_folder, "3_Synergy")
-    synergy_output_path = os.path.join(synergy_folder, "Synergy_results.h5")
-    
-    # 加载协同模式结果
-    if os.path.exists(synergy_output_path):
-        # 这里假设你有加载结果的方法
-        # ssp.load_results(synergy_output_path)
-        pass
-    
-    # 绘制协同模式分布图
-    fig, ax = plot_radial_distribution_with_contours(ssp, mode='Synergy', 
-                                                     show_nbi=show_nbi_in_synergy, 
-                                                     show_icrh=show_icrh_in_synergy)
-    synergy_plot_path = os.path.join(plots_folder, "Synergy_distribution.png")
-    plt.savefig(synergy_plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"协同模式分布图已保存: {synergy_plot_path}")
-    
-    print("所有模式分布图绘制完成！")
+    """Reject the legacy placeholder loader rather than relabeling one solve three times."""
+    raise NotImplementedError(
+        "plot_all_modes has no implemented result loader. Use run_selected_modes "
+        "to solve and plot each mode from its own distribution."
+    )
 
 # ===================================================================
 # 模式选择
@@ -8179,8 +8067,7 @@ if __name__ == "__main__":
     case_mode, ipsii, run_modes = apply_config_settings(ssp, para)
 
     if case_mode == 0:
-        ipsii = [1]  # 单径向点位置
-        ipsiii = [int(i) for i in ipsii]  # 单径向点索引
+        ipsiii = [1]  # 单点数组索引与输入的物理 rho 分开。
         nrdpsi = 1
         ssp.nrdpsi = nrdpsi
         ssp.info = 1
