@@ -590,6 +590,24 @@ class FP:
                             print(f"警告: 第{itry}次迭代解无效")
                             break
 
+                        # 直接检查 Ax=b；保持带状存储，避免构造完整矩阵。
+                        residual = -self.fb_store.copy()
+                        for offset in range(-self.iwd, self.iwd + 1):
+                            col_start = max(0, -offset)
+                            col_stop = min(self.nfdim, self.nfdim - offset)
+                            residual[col_start + offset:col_stop + offset] += (
+                                aa[self.iwd + offset, col_start:col_stop]
+                                * self.fb[col_start:col_stop]
+                            )
+                        self.matrix_relative_residual = float(
+                            np.linalg.norm(residual, ord=np.inf)
+                            / max(np.linalg.norm(self.fb_store, ord=np.inf), np.finfo(float).tiny)
+                        )
+                        append_to_file(
+                            self.output_paths["read"],
+                            f"线性方程相对残差 ||Ax-b||∞/||b||∞ = {self.matrix_relative_residual:.6e}\n"
+                        )
+
                         # # Solve for coefficients
                         # self.fb = linalg.lu_solve((lu, piv), self.fb)
                         
@@ -630,6 +648,19 @@ class FP:
                         row1_padded = np.concatenate((row1, np.full(padding_size, '')))
                         full_matrix = np.vstack((row1_padded, row2, data_with_index))
                         np.savetxt(filename, full_matrix, fmt='%s', delimiter=' ')
+                        np.savez_compressed(
+                            os.path.splitext(filename)[0] + '.npz',
+                            raw_coefficients=self.raw_tbfu,
+                            raw_derivatives=self.raw_tbdfu,
+                            normalized_coefficients=self.tbfu,
+                            normalized_derivatives=self.tbdfu,
+                            raw_distribution=self.raw_tbfu @ self.plgcmu,
+                            normalized_distribution=self.tfecmu,
+                            energies_keV=Es,
+                            mu=self.xmu,
+                            fnorm=self.fnorm,
+                            matrix_relative_residual=self.matrix_relative_residual,
+                        )
                         print(f"✅ 分布函数已保存: {filename}")
 
                         idx_pos = np.argmin(np.abs(self.xmu - 0.8))
@@ -1876,18 +1907,18 @@ class FP:
             # append_to_file(self.output_paths["read"], f"整理后pwnbi = {self.pwnbi}\n")
             # append_to_file(self.output_paths["read"], f"整理后pwnbi_l = {self.pwnbi_l}\n")
 
-            # 验证能量守恒
+            # 这里只检验代数缩放；真正进入方程的源能量矩在 matrix 中独立积分。
             expected_power = self.pwdens_nbi
             actual_power = self.pwnbi
             energy_error = abs(actual_power - expected_power) / expected_power
 
             append_to_file(self.output_paths["read"], f"功率吸收输入pwdens_nbi = {self.pwdens_nbi}\n")
-            append_to_file(self.output_paths["read"], f"实际功率pwnbi = {self.pwnbi}\n")
-            append_to_file(self.output_paths["read"], f"能量误差 = {energy_error:.2e}\n")
+            append_to_file(self.output_paths["read"], f"束系数标定功率pwnbi = {self.pwnbi}\n")
+            append_to_file(self.output_paths["read"], f"输入功率代数缩放相对误差 = {energy_error:.2e}\n")
 
             if energy_error > 1e-6:
-                append_to_file(self.output_paths["read"], f"警告：NBI能量不守恒，误差: {energy_error:.2e}\n")
-                print(f"警告：NBI能量不守恒，误差: {energy_error:.2e}")
+                append_to_file(self.output_paths["read"], f"警告：NBI输入功率缩放不一致，误差: {energy_error:.2e}\n")
+                print(f"警告：NBI输入功率缩放不一致，误差: {energy_error:.2e}")
             
             # # 计算物理注入速率
             # E_beam_J = self.nbi_energies_keV[0] * 1.602E-16
@@ -2326,6 +2357,8 @@ class FP:
         self.fb = np.zeros(self.nfdim)
         self.fmatrx = np.zeros((self.iwdmtr, self.nfdim))
         self.psource = np.zeros(self.nfvrb) # 源项
+        self.nbi_particle_source_moment = 0.0
+        self.nbi_source_power = 0.0
         # self.pwnbi = 0.0
         # self.pwnbi_l = 0.0
 
@@ -2352,6 +2385,13 @@ class FP:
                     # append_to_file(self.output_paths["read"], f"系数 fgamm = \n{self.fgamm}\n")
 
                 w = self.xstep * self.wgaus[i]
+
+                # 与弱形式右端使用完全相同的 Gauss 点和源，独立于 ΣE_k sig[k,0]。
+                if self.nbi_enabled:
+                    u = self.tbu[ip] + self.du * self.zgaus[i]
+                    nbi_source = self.source_nbi[0] * self.dnbi
+                    self.nbi_particle_source_moment += 4.0 * np.pi * w * nbi_source
+                    self.nbi_source_power += 4.0 * np.pi * self.zemxw * w * u**2 * nbi_source
 
                 # 添加到Gauss积分的贡献
                 for ipla in range(self.nfvrb):
@@ -2417,6 +2457,12 @@ class FP:
             self.addrhs(ip, self.uvp)
             # 点ip+1处的源项
             self.addrhs(ip+1, self.uvm)
+
+        append_to_file(
+            self.output_paths["read"],
+            f"NBI 弱形式粒子源矩（归一化前） = {self.nbi_particle_source_moment:.12e}\n"
+            f"NBI 方程源能量矩（归一化前） = {self.nbi_source_power:.12e} W/cm³\n"
+        )
         
         # # 计算NBI源功率
         # if self.nbi_enabled:
@@ -2935,79 +2981,7 @@ class FP:
                 self.dql01[ln, lm] = self.dqlw * sum01
                 self.dql11[ln, lm] = self.dqlw * sum11
 
-        # 无论是否有 NBI，对于 n+m 为奇数的项，物理上 Q00 和 Q11 也必须为 0
-        # (因为 (1-mu^2)^p * mu^{2k} 是偶函数，与奇数阶 P_n 积分为 0)
-        for ln in range(self.legmod + 1):
-            for lm in range(ln + 1, self.legmod + 1):
-                # 如果奇偶性不同，强制清零
-                if (ln + lm) % 2 != 0:
-                    self.dql00[ln, lm] = 0.0
-                    self.dql00[lm, ln] = 0.0
-                    self.dql01[ln, lm] = 0.0
-                    self.dql01[lm, ln] = 0.0
-                    self.dql11[ln, lm] = 0.0
-                    self.dql11[lm, ln] = 0.0
-                else:
-                    # 奇偶性相同时，强制对称消除数值误差
-                    avg_00 = 0.5 * (self.dql00[ln, lm] + self.dql00[lm, ln])
-                    self.dql00[ln, lm] = avg_00
-                    self.dql00[lm, ln] = avg_00
-                    
-                    avg_11 = 0.5 * (self.dql11[ln, lm] + self.dql11[lm, ln])
-                    self.dql11[ln, lm] = avg_11
-                    self.dql11[lm, ln] = avg_11
-        # ====================================================
-
-        # # ================= 【终极修复：双模式物理隔离】 =================
-        # # 判断当前是否存在任何物理不对称源
-        # has_asymmetry_source = False
-        # if hasattr(self, 'use_weighted_coelgd') and self.use_weighted_coelgd:
-        #     has_asymmetry_source = True  # 开启了捕获效应权重
-        # if hasattr(self, 'nbi_enabled') and self.nbi_enabled:
-        #     has_asymmetry_source = True  # 开启了 NBI 注入
-            
-        # if not has_asymmetry_source:
-        #     # 【模式 A：纯 ICRH】
-        #     # 物理要求：分布函数必须是纯偶函数，奇数阶严格为 0。
-        #     # 为了防止数值误差激发奇数阶，必须切断所有偶奇耦合通道。
-        #     # 1. 强制 dql01 全局为 0：这是最致命的耦合通道，会把巨大的 f0 梯度泄漏给 f1
-        #     self.dql01[:, :] = 0.0
-            
-        #     # 2. 强制 dql00 和 dql11 的奇偶交叉项为 0：防止矩阵求解时串扰
-        #     for ln in range(self.legmod + 1):
-        #         for lm in range(self.legmod + 1):
-        #             if (ln + lm) % 2 != 0:
-        #                 self.dql00[ln, lm] = 0.0
-        #                 self.dql11[ln, lm] = 0.0
-                        
-        # else:
-        #     # 【模式 B：ICRF + NBI (或捕获效应)】
-        #     # 物理要求：奇数阶被 NBI 激发，分布函数不对称。
-        #     # 此时 dql01 必须保留（NBI 的推力需要它），但 ICRF 部分本身依然是偶函数。
-        #     # ICRF 的 Q00 和 Q11 依然是偶函数，它们的奇偶交叉项在物理上必须为 0。
-        #     for ln in range(self.legmod + 1): # 注意：这里原代码有拼写错误，应为 legmod
-        #         for lm in range(self.legmod + 1):
-        #             if (ln + lm) % 2 != 0:
-        #                 self.dql00[ln, lm] = 0.0
-        #                 self.dql11[ln, lm] = 0.0
-        #                 # 注意：这里不清零 dql01，保留 NBI 的推力通道！
-                        
-        # # 【通用操作】：强制同奇偶项对称，消除数值积分误差
-        # for ln in range(self.legmod + 1):
-        #     for lm in range(ln + 1, self.legmod + 1):
-        #         if (ln + lm) % 2 == 0:
-        #             avg_00 = 0.5 * (self.dql00[ln, lm] + self.dql00[lm, ln])
-        #             self.dql00[ln, lm] = avg_00
-        #             self.dql00[lm, ln] = avg_00
-                    
-        #             avg_11 = 0.5 * (self.dql11[ln, lm] + self.dql11[lm, ln])
-        #             self.dql11[ln, lm] = avg_11
-        #             self.dql11[lm, ln] = avg_11
-        # # =============================================================
-
-
-
-
+        # qleg 已包含所选捕获权重；这里不再改变耦合，保证与 qlrate 使用同一算子。
 
     def qldcoe(self, u):
         """计算准线性扩散系数中的贝塞尔函数
@@ -3155,85 +3129,50 @@ class FP:
         print("="*80 + "\n")
 
     def coelgd_with_weight_optimized(self, enable_weight=False, uc=0.0, a=0.0, force_pure_numerical=False):
+        """数值积分角向系数，保留配置声明的单侧 W(μ) 权重。
+
+        force_pure_numerical 保留调用兼容性；有权和无权情形均采用相同积分方法。
         """
-        优化版：使用向量化运算和矩阵乘法加速数值积分
-        增加控制开关：
-        - enable_weight: 是否使用捕获效应权重 (Sigmoid)
-        - force_pure_numerical: 强制使用纯数值积分 (即使 W=1 也不调用解析基准)
-        """
-        # 设置标记，供 qlcoef 判断
-        # 如果强制纯数值，我们认为它是带权重的变体，不强制 dql01=0
-        self.use_weighted_coelgd = enable_weight or force_pure_numerical
-        self.use_weighted_coelgd = True
-        
-        # 1. 初始化输出数组
-        self.qleg00 = np.zeros((self.legmod+1, self.legmod+1, self.kamax+1))
-        self.qleg01 = np.zeros((self.legmod+1, self.legmod+1, self.kamax+1))
-        self.qleg11 = np.zeros((self.legmod+1, self.legmod+1, self.kamax+1))
-        
-        # # 2. 标准逻辑：如果不启用权重且不强制纯数值，则调用解析基准
-        # if not enable_weight and not force_pure_numerical:
-        #     self.coelgd()
-        #     return
-            
-        # --- 以下是数值积分逻辑 ---
-        
-        # 3. 设置数值积分网格
-        num_points = 500
+        self.use_weighted_coelgd = enable_weight
+
+        # Simpson 三分之一规则需要偶数个区间。
+        num_points = 501
         u_vals = np.linspace(-1.0, 1.0, num_points)
         du = u_vals[1] - u_vals[0]
-        
-        # 4. 预计算权重
-        if enable_weight:
-            weight = 1.0 / (1.0 + np.exp(-a * (u_vals - uc)))
-        else:
-            weight = np.ones(num_points) # W=1 纯数值模式
-            
-        # 几何因子 (1-u^2)^{1+p}: Shape (N,)
+        weight = special.expit(a * (u_vals - uc)) if enable_weight else np.ones(num_points)
+
         p_power = 0 if self.ipheat == 1 else 1
         geo_base = (1.0 - u_vals**2)**(1 + p_power)
-        
-        # u^{2k} 算子: Shape (Kmax+1, N)
         k_indices = np.arange(self.kamax + 1).reshape(-1, 1)
         u_powers = u_vals.reshape(1, -1) ** (2 * k_indices)
-        
-        # 组合基础权重因子: Shape (Kmax+1, N)
         base_weight = weight * geo_base * u_powers
-        
-        # 5. 预计算勒让德多项式矩阵
+
         P_vals = np.zeros((self.legmod + 1, num_points))
-        dP_vals = np.zeros((self.legmod + 1, num_points))
-        
+        dP_vals = np.zeros_like(P_vals)
         for n in range(self.legmod + 1):
             Pn = legendre(n)
             P_vals[n, :] = Pn(u_vals)
             dP_vals[n, :] = Pn.deriv()(u_vals)
-            
-        # 使用递推关系计算 u * P_n'(u)
-        u_dP_vals = np.zeros_like(P_vals)
-        for n in range(self.legmod + 1):
-            u_dP_vals[n, :] = n * P_vals[n, :]
-            k_rec = n - 1
-            while k_rec >= 0:
-                u_dP_vals[n, :] += (2*k_rec + 1) * P_vals[k_rec, :]
-                k_rec -= 1
-        
-        # 6. 计算辛普森权重系数
+        u_dP_vals = u_vals * dP_vals
+
         simpson_w = np.ones(num_points)
         simpson_w[1:-1:2] = 4
         simpson_w[2:-1:2] = 2
-        simpson_w = simpson_w * (du / 3.0)
-        
-        base_weight_s = base_weight * simpson_w
-        
-        # 7. 计算积分
+        base_weight_s = base_weight * (simpson_w * du / 3.0)
+
         self.qleg00 = np.einsum('ki,li,mi->lmk', base_weight_s, P_vals, P_vals, optimize=True)
         self.qleg01 = np.einsum('ki,li,mi->lmk', base_weight_s, P_vals, u_dP_vals, optimize=True)
         self.qleg11 = np.einsum('ki,li,mi->lmk', base_weight_s, u_dP_vals, u_dP_vals, optimize=True)
 
-        
+        if not enable_weight:
+            # 只有 W=1 时才能按奇偶性去除舍入误差；在积分层统一处理，
+            # 使矩阵组装和功率诊断同时使用这些系数。
+            orders = np.arange(self.legmod + 1)
+            odd_pairs = (orders[:, None] + orders[None, :]) % 2 != 0
+            self.qleg00[odd_pairs, :] = 0.0
+            self.qleg01[odd_pairs, :] = 0.0
+            self.qleg11[odd_pairs, :] = 0.0
 
-    
     # def coelgd_with_weight_optimized(self, enable_weight=False, uc=0.0, a=0.0):
     #     """
     #     优化版：使用向量化运算和矩阵乘法加速数值积分
@@ -3714,14 +3653,14 @@ class FP:
                 self.tbfu[ip, n] = self.fb[i]
                 self.tbdfu[ip, n] = self.fb[i+1]
 
-        # 以0阶为归一化参数：4π∫f0(v)v^2dv
+        # 保留求解器原始幅值，便于区分源项响应与归一化后的分布形状。
+        self.raw_tbfu = self.tbfu.copy()
+        self.raw_tbdfu = self.tbdfu.copy()
+
+        # 所有阶使用同一归一化因子，保持角向结构不变。
         self.fnorm = 4. * np.pi * self.qlmomu(self.tbfu[:, 0], self.du, self.nptu, 0)
         self.tbfu /= self.fnorm
         self.tbdfu /= self.fnorm
-
-        # 【关键修复】：只归一化 f_0，保留 f_1, f_2 的原始幅值！
-        # self.tbfu[:, 0] /= self.fnorm
-        # self.tbdfu[:, 0] /= self.fnorm
 
         # print(f"保存F(v)至11_Fv.txt")
         # tbfu_new = self.tbfu.copy()
@@ -3822,25 +3761,31 @@ class FP:
         # self.zbalpw = hrate + self.pwsrce + pwnbi_dimensionless + self.pwcoll[1]
 
         # self.zbalpw = hrate + self.pwcoll[1] + self.pwsrce + self.pwnbi + self.pwnbi_l # Wql + Wcoll + Wsrc + Wnbi + Wnbiloss = 0
-        self.zbalpw = hrate + self.pwcoll[1] + self.pwsrce
+        self.zbalpw = hrate + self.pwcoll[1] + self.pwsrce / self.fnorm
+        # f_raw / fnorm 满足的方程，其固定源也应除以 fnorm。
+        # 这是体积能量诊断，未计边界通量，不能作为线性或物理收敛判据。
+        self.bulk_power_residual = (
+            hrate + self.pwcoll[1] + (self.pwsrce + self.nbi_source_power) / self.fnorm
+        )
 
         append_to_file(self.output_paths["read"], f"pwcoll = {self.pwcoll}\n")
-        append_to_file(self.output_paths["read"], f"功率平衡情况 zbalpw = {self.zbalpw}= {hrate} + {self.pwcoll[1]} + {self.pwsrce}\n")
+        append_to_file(self.output_paths["read"], f"部分功率残差（未含NBI源和边界通量） zbalpw = {self.zbalpw}= {hrate} + {self.pwcoll[1]} + {self.pwsrce / self.fnorm}\n")
+        append_to_file(
+            self.output_paths["read"],
+            f"归一化解体积功率残差（未计边界通量，含积分离散误差） = {self.bulk_power_residual:.6e} W/cm³\n"
+        )
 
         # if abs(self.zbalpw) > self.accuracy_goal:
         #     self.iok = 0
         #     if itry < self.itrmax:
         #         return
         
-        # 获得收敛，确定其他参数
+        # 当前执行一次线性求解；iok 不表示已经通过物理守恒检验。
         self.iok = 1
         self.fb1_prv = self.fb[0]
         
-        # 归一化到线性功率
-        if hrate != 0.0:
-            self.zpnorm = self.pwdens / hrate
-        else:
-            self.zpnorm = 1.0
+        # 碰撞功率与 hrate 必须使用同一份解，不能再按参考输入功率缩放。
+        self.zpnorm = 1.0
         
         # 向其他物种的碰撞转移
         for isp in range(self.nspele):
@@ -5132,12 +5077,11 @@ class FP:
                     mptp = 0
                     for ip in range(self.nptu):
                         fe = self.tfecmu[ip, imu]
-                        if fe >= fmin:
+                        if fe > 0.0 and fe >= fmin:
                             self.tbpl[ip] = np.log10(fe)
                             mptp = ip
                         else:
                             self.tbpl[ip] = -999.0
-                            self.tfecmu[ip, imu] = 0
                         
 
                     # if mptp >= 5:
@@ -5188,9 +5132,9 @@ class FP:
         append_to_file(self.output_paths["read"], f"{' '*10}准线性加热率      {self.hrate:13.6E} W/cm3\n")
         append_to_file(self.output_paths["read"], f"{' '*10}碰撞损失           {self.pwcoll[1]:13.5E} W/cm3\n")
         append_to_file(self.output_paths["read"], f"{' '*10}          （在麦克斯韦极限下  {self.pwsrce:13.5E} W/cm3）\n")
-        append_to_file(self.output_paths["read"], f"{' '*10}NBI电离           {self.pwnbi:13.4E} W/cm3\n")
-        append_to_file(self.output_paths["read"], f"{' '*10}NBI电离损失        {self.pwnbi_l:13.4E} W/cm3\n")
-        append_to_file(self.output_paths["read"], f"{' '*10}总平衡              {self.zbalpw:13.4E} W/cm3\n")
+        append_to_file(self.output_paths["read"], f"{' '*10}NBI束系数标定功率   {self.pwnbi:13.4E} W/cm3\n")
+        append_to_file(self.output_paths["read"], f"{' '*10}NBI参考损失（未加入源） {self.pwnbi_l:13.4E} W/cm3\n")
+        append_to_file(self.output_paths["read"], f"{' '*10}部分残差（未含NBI源和边界通量） {self.zbalpw:13.4E} W/cm3\n")
 
         append_to_file(self.output_paths["read"], f"{self.pwexch[1, :]}\n")
         append_to_file(self.output_paths["read"], "\n")
@@ -5206,8 +5150,12 @@ class FP:
             else:
                 append_to_file(self.output_paths["read"], f"{' '*10}在物种{isp:3d}上的损失 :{self.pwexch[1, isp]:13.4E} W/cm3\n")
                 append_to_file(self.output_paths["read"], f"{' '*15}没有高频（麦克斯韦）     {self.pwexch[0, isp]:13.4E} W/cm3\n")
-                frhteb = 100.0 * (self.pwexch[1, isp] - self.pwexch[0, isp]) / self.pwdens
-                append_to_file(self.output_paths["read"], f"{' '*15}差值（仅高频）  {self.pwexch[1, isp] - self.pwexch[0, isp]:13.4E} W/cm3 (= {frhteb:10.2f} %)\n")
+                difference = self.pwexch[1, isp] - self.pwexch[0, isp]
+                if self.pwdens != 0.0:
+                    fraction = f"相对ICRH参考输入 {100.0 * difference / self.pwdens:.2f} %"
+                else:
+                    fraction = "ICRH参考输入为零，不计算比例"
+                append_to_file(self.output_paths["read"], f"{' '*15}相对麦克斯韦的差值 {difference:13.4E} W/cm3 ({fraction})\n")
 
         ze = 2.0 * self.emax / self.ttailx
         zcut = 0.5 * (ze + 1.0) * np.exp(-ze)
@@ -5762,11 +5710,9 @@ class FP:
         # 计算能量
         Es = self.tbu**2 * ctx.tempi[self.ispres]
         
-        min_cutoff_ip = 1
-        if min_cutoff_ip > 0:
-            self.tfecmu[:min_cutoff_ip, :] = np.nan
-
         f = self.tfecmu.copy()
+        min_cutoff_ip = 1
+        f[:min_cutoff_ip, :] = np.nan
         fmax = self.f_max
         f[f > fmax] = np.nan
         fmin = self.f_min
@@ -6910,8 +6856,8 @@ class FP:
 
     def extract_high_energy_tail_contour(self, absolute_threshold=None):
         """
-        从当前计算结果中提取高能尾的等值轮廓线，并确定特征 pitch angle
-        使用 f_min 作为阈值，并引入亚网格插值提高尖端位置精度
+        提取高能尾等值线，返回其向高能方向延伸最远处的 μ 和能量。
+        默认阈值为 f_min；达到能域末点仍未降至阈值的曲线保留末点。
         """
         if self.tfecmu is None or self.tbkev is None:
             return None, None, None, None
@@ -6922,7 +6868,6 @@ class FP:
             
         tail_E = []
         tail_mu = []
-        tail_f_vals = []  
         
         for imu in range(self.nmu):
             f_profile = self.tfecmu[:, imu]
@@ -6944,7 +6889,7 @@ class FP:
             while tail_idx < len(f_profile) - 1 and f_profile[tail_idx] >= absolute_threshold:
                 tail_idx += 1
                 
-            # 如果没有找到下降到阈值的位置（即整个分布都高于阈值）
+            # 如果搜索到末点，使用最后一个有效点。
             if tail_idx >= len(f_profile) - 1:
                 # 使用最后一个有效点作为尾部位置
                 valid_indices = np.where(~np.isnan(f_profile))[0]
@@ -6954,7 +6899,7 @@ class FP:
                     continue
                     
             # 在阈值附近进行插值，提高精度
-            if tail_idx > 0 and tail_idx < len(f_profile) - 1:
+            if tail_idx > 0 and f_profile[tail_idx] < absolute_threshold:
                 # 使用线性插值
                 f1 = f_profile[tail_idx - 1]
                 f2 = f_profile[tail_idx]
@@ -6971,11 +6916,9 @@ class FP:
             
             tail_E.append(E_refined)
             tail_mu.append(self.xmu[imu])
-            tail_f_vals.append(f_profile[tail_idx])
                 
         tail_E = np.array(tail_E)
         tail_mu = np.array(tail_mu)
-        tail_f_vals = np.array(tail_f_vals)
         
         characteristic_E = None
         characteristic_mu = None
@@ -7005,8 +6948,8 @@ class FP:
         记录内容：
         - 输入信息：NBI 功率 pwdens_nbi、束能量 energies_keV（NBI 开启时）；
           ICRH 输入功率 pwdens、trapping 参数（ICRH 开启时）
-        - 输出信息：分布能量峰值特征（extract_high_energy_tail_contour 得到的特征值 E 和 μ）；
-          NBI 模式下 tfecmu 在束能量附近的最大值及对应的 E 和 μ
+        - 输出信息：尾端等值线的位置、阈值及能域截断情况；
+          原始/归一化后的 NBI 束附近峰值和分布非负性诊断
         每个径向点追加一段记录。
         """
         # 汇总文件在结果根目录（模式文件夹的上一级）
@@ -7044,14 +6987,28 @@ class FP:
 
         # ---- 输出信息（每个径向点一段） ----
         lines.append(f"{'-'*10} 径向位置 psi = {self.redpsi[ipsi-1]} {'-'*10}\n")
+        lines.append(f"  整体归一化因子 fnorm = {self.fnorm:.12e}\n")
+        lines.append(f"  带状矩阵相对残差 = {self.matrix_relative_residual:.6e}\n")
+        min_iE, min_imu = np.unravel_index(np.nanargmin(self.tfecmu), self.tfecmu.shape)
+        lines.append(f"  归一化分布最小值 = {self.tfecmu[min_iE, min_imu]:.6e}, "
+                     f"E = {self.tbkev[min_iE]:.4f} keV, mu = {self.xmu[min_imu]:.4f}, "
+                     f"负值网格点数 = {np.count_nonzero(self.tfecmu < 0)}\n")
 
         tail_E, tail_mu, char_mu, char_E = self.extract_high_energy_tail_contour()
-        lines.append("分布能量峰值特征（extract_high_energy_tail_contour）\n")
+        lines.append("尾端等值线特征（extract_high_energy_tail_contour）\n")
+        lines.append(f"  等值线阈值 f_min = {self.f_min:.6e}\n")
         lines.append(f"  特征能量 char_E = {char_E} keV\n")
         lines.append(f"  特征俯仰角 char_mu = {char_mu}\n")
+        boundary_mu = tail_mu[tail_E == self.tbkev[-1]]
+        lines.append(f"  能域边界截断 = {bool(len(boundary_mu))}, "
+                     f"E_max = {self.tbkev[-1]:.4f} keV, "
+                     f"触及边界的 mu = {boundary_mu.tolist()}\n")
 
         # NBI 模式：束能量附近（±5% 窗口）tfecmu 的最大值及对应 E 和 μ
         if self.nbi_enabled:
+            lines.append(f"  方程NBI源能量矩（归一化前） = {self.nbi_source_power:.6e} W/cm^3\n")
+            lines.append(f"  方程NBI源能量矩 / fnorm = {self.nbi_source_power / self.fnorm:.6e} W/cm^3\n")
+            raw_distribution = self.raw_tbfu @ self.plgcmu
             for E_beam in np.atleast_1d(self.nbi_energies_keV):
                 idx_E = np.where(np.abs(self.tbkev - E_beam) <= 0.05 * E_beam)[0]
                 if len(idx_E) == 0:
@@ -7061,6 +7018,7 @@ class FP:
                 lines.append(f"束能量 {E_beam} keV 附近 tfecmu 最大值\n")
                 lines.append(f"  max(tfecmu) = {sub[iE, imu]:.6e},  "
                              f"E = {self.tbkev[idx_E[iE]]:.4f} keV,  mu = {self.xmu[imu]:.4f}\n")
+                lines.append(f"  归一化前原始峰值 = {np.nanmax(raw_distribution[idx_E, :]):.6e}\n")
 
         with open(debug_path, 'a', encoding='utf-8') as f:
             f.writelines(lines)
